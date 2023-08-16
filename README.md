@@ -1,2 +1,1 @@
-# wallet-bridge
-Establishes a very simple zero-knowledge bridge to pass World ID ZKPs from wallets to verifying apps.
+# A bridge between the World ID SDK and the World App

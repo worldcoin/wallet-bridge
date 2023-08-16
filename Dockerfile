@@ -5,7 +5,7 @@ FROM rust:latest AS builder
 
 RUN update-ca-certificates
 
-WORKDIR /world-id-bridge
+WORKDIR /app
 
 COPY ./Cargo.toml .
 COPY ./Cargo.lock .
@@ -25,9 +25,8 @@ RUN cargo build --release
 ####################################################################################################
 FROM gcr.io/distroless/cc
 
-WORKDIR /world-id-bridge
+WORKDIR /app
 
-# Copy our build
-COPY --from=builder /world-id-bridge/target/release/world-id-bridge /world-id-bridge/world-id-bridge
+COPY --from=builder /app/target/release/world-id-bridge /app/world-id-bridge
 
-CMD ["/world-id-bridge/world-id-bridge"]
+CMD ["/app/world-id-bridge"]

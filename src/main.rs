@@ -1,48 +1,13 @@
+#![warn(clippy::all, clippy::pedantic, clippy::nursery)]
+
 use dotenvy::dotenv;
-use hyper::Method;
-use hyper::{service::service_fn, Body, Request, Response, Server};
-use redis::{aio::ConnectionManager, AsyncCommands, Client};
-use std::convert::Infallible;
-use std::{env, net::SocketAddr};
-use tower::make::Shared;
+use redis::{aio::ConnectionManager, Client};
+use std::env;
 
-async fn handle_request(
-    mut conn: ConnectionManager,
-    req: Request<Body>,
-) -> Result<Response<Body>, Infallible> {
-    let path = req.uri().path();
-    let id = &path[1..].to_string();
+mod routes;
+mod server;
 
-    if id.is_empty() {
-        return Ok(Response::builder().status(404).body(Body::empty()).unwrap());
-    }
-
-    match *req.method() {
-        Method::GET => {
-            let Ok(value) = conn.get::<_, String>(id).await else {
-                return Ok(Response::builder().status(404).body(Body::empty()).unwrap());
-            };
-
-            Ok(Response::builder().status(200).body(value.into()).unwrap())
-        }
-        Method::PUT => {
-            let Ok(value) = hyper::body::to_bytes(&mut req.into_body()).await else {
-                return Ok(Response::builder().status(400).body(Body::empty()).unwrap());
-            };
-
-            if conn
-                .set_ex::<_, _, ()>(id, value.to_vec(), 600)
-                .await
-                .is_err()
-            {
-                return Ok(Response::builder().status(500).body(Body::empty()).unwrap());
-            }
-
-            Ok(Response::builder().status(201).body(Body::empty()).unwrap())
-        }
-        _ => Ok(Response::builder().status(404).body(Body::empty()).unwrap()),
-    }
-}
+const EXPIRE_AFTER_SECONDS: usize = 60;
 
 #[tokio::main]
 async fn main() {
@@ -60,14 +25,5 @@ async fn main() {
     .await
     .expect("Failed to create redis connection manager");
 
-    let make_service = Shared::new(service_fn(move |req| handle_request(redis.clone(), req)));
-
-    let addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], 3000));
-
-    let server = Server::bind(&addr).serve(make_service);
-    println!("Listening on http://{}", addr);
-
-    if let Err(e) = server.await {
-        eprintln!("server error: {}", e);
-    }
+    server::start(redis).await;
 }
