@@ -10,10 +10,8 @@ description = "A bridge between the World ID SDK and the World App"
 [dependencies]
 axum = "0.6.20"
 tower = "0.4.13"
-serde = "1.0.183"
+serde = { version = "1.0.183", features = ["derive"] }
 dotenvy = "0.15.7"
-lambda_http = "0.8.1"
-axum-aws-lambda = "0.5.0"
 tracing = { version = "0.1", features = ["log"] }
 tokio = { version = "1.31.0", features = ["full"] }
 tower-http = { version = "0.4.3", features = ["cors"] }
