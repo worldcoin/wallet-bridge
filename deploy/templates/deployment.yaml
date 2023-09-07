@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: {{ include "world-id-bridge.fullname" . }}
+    labels:
+        app: {{ include "world-id-bridge.fullname" . }}
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            app: {{ include "world-id-bridge.fullname" . }}
+    template:
+        metadata:
+            labels:
+                app: {{ include "world-id-bridge.fullname" . }}
+        spec:
+            serviceAccountName: {{ .Values.serviceAccountName }}
+            containers:
+                - name: app
+                  image: {{ .Values.image }}
+                  ports:
+                      - name: http
+                        containerPort: 8000
+                        protocol: TCP
+                  env:
+                    - name: REDIS_URL
+                      value: {{ printf "redis://%s-redis-master:6379" .Release.Name | quote }}
+                    - name: DD_SERVICE
+                      value: {{ include "world-id-bridge.fullname" . }}
+                    - name: DD_TRACE_STARTUP_LOGS
+                      value: 'true'
+                    - name: DD_AGENT_HOST
+                      value: traces
+                    - name: DD_VERSION
+                      value: {{ .Chart.Version }}
+                    - name: K8S_POD_NAME
+                      valueFrom:
+                          fieldRef:
+                              fieldPath: metadata.name
+                  resources:
+                      requests:
+                          memory: '1Gi'
+                          cpu: '1'
+                      limits:
+                          memory: '2Gi'
+                          cpu: '2'

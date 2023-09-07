@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+    name: {{ include "world-id-bridge.fullname" . }}
+spec:
+    type: ClusterIP
+    selector:
+        app: {{ include "world-id-bridge.fullname" . }}
+    ports:
+        - protocol: TCP
+          port: 8000
+          targetPort: 8000

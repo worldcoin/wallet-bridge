@@ -1,0 +1,22 @@
+image: ghcr.io/worldcoin/wallet-bridge:main
+domain: bridge-staging.id.worldcoin.org
+
+# -- Security context section of the Pod template
+podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+        type: RuntimeDefault
+
+# -- Security context section of the Pod template
+securityContext:
+    capabilities:
+        drop:
+            - ALL
+    allowPrivilegeEscalation: false
+
+serviceAccountName: world-id-bridge
+serviceAccountRoleArn: arn:aws:iam::453286808734:role/id-stage-eu-central-1-world-id-bridge-eu-central-1
+
+redis:
+    enabled: true
+    usePassword: false
