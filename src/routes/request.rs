@@ -6,7 +6,7 @@ use axum::{
     Extension, Router,
 };
 use redis::{aio::ConnectionManager, AsyncCommands};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 
 use crate::EXPIRE_AFTER_SECONDS;
 
@@ -14,15 +14,16 @@ const REQ_PREFIX: &str = "req:";
 
 pub fn handler() -> Router {
     let cors = CorsLayer::new()
-        .allow_methods([Method::PUT, Method::HEAD])
-        .allow_origin(Any);
+        .allow_origin(Any)
+        .allow_headers(AllowHeaders::any())
+        .allow_methods([Method::PUT, Method::HEAD]);
 
     Router::new().route(
         "/request/:request_id",
         head(has_request)
             .get(get_request)
             .put(insert_request)
-            .route_layer(cors),
+            .layer(cors),
     )
 }
 
