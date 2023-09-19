@@ -15,8 +15,8 @@ const RES_PREFIX: &str = "res:";
 pub fn handler() -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET])
-        .allow_headers(AllowHeaders::any());
+        .allow_headers(AllowHeaders::any())
+        .allow_methods([Method::GET, Method::PUT]); //TODO: PUT is required by the simulator but should not be included
 
     Router::new().route(
         "/response/:request_id",
