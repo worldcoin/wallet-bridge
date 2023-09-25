@@ -1,16 +1,22 @@
 use axum::{
-    body::Bytes,
     extract::Path,
     http::{Method, StatusCode},
     routing::head,
-    Extension, Router,
+    Extension, Json, Router,
 };
 use redis::{aio::ConnectionManager, AsyncCommands};
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
+use uuid::Uuid;
 
 use crate::EXPIRE_AFTER_SECONDS;
 
 const REQ_PREFIX: &str = "req:";
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct Request {
+    iv: String,
+    payload: String,
+}
 
 pub fn handler() -> Router {
     let cors = CorsLayer::new()
@@ -28,7 +34,7 @@ pub fn handler() -> Router {
 }
 
 async fn has_request(
-    Path(request_id): Path<String>,
+    Path(request_id): Path<Uuid>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> StatusCode {
     let Ok(exists) = redis
@@ -46,24 +52,34 @@ async fn has_request(
 }
 
 async fn get_request(
-    Path(request_id): Path<String>,
+    Path(request_id): Path<Uuid>,
     Extension(mut redis): Extension<ConnectionManager>,
-) -> Result<Vec<u8>, StatusCode> {
+) -> Result<Json<Request>, StatusCode> {
     let value = redis
         .get_del::<_, Option<Vec<u8>>>(format!("{REQ_PREFIX}{request_id}"))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    value.ok_or(StatusCode::NOT_FOUND)
+    value.map_or_else(
+        || Err(StatusCode::NOT_FOUND),
+        |value| {
+            serde_json::from_slice(&value).map_or(Err(StatusCode::INTERNAL_SERVER_ERROR), |value| {
+                Ok(Json(value))
+            })
+        },
+    )
 }
 
 async fn insert_request(
-    Path(request_id): Path<String>,
+    Path(request_id): Path<Uuid>,
     Extension(mut redis): Extension<ConnectionManager>,
-    body: Bytes,
+    Json(request): Json<Request>,
 ) -> Result<StatusCode, StatusCode> {
     if !redis
-        .set_nx::<_, _, bool>(format!("{REQ_PREFIX}{request_id}"), body.to_vec())
+        .set_nx::<_, _, bool>(
+            format!("{REQ_PREFIX}{request_id}"),
+            serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {

@@ -7,6 +7,7 @@ use axum::{
 };
 use redis::{aio::ConnectionManager, AsyncCommands};
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
+use uuid::Uuid;
 
 use crate::EXPIRE_AFTER_SECONDS;
 
@@ -25,7 +26,7 @@ pub fn handler() -> Router {
 }
 
 async fn get_response(
-    Path(request_id): Path<String>,
+    Path(request_id): Path<Uuid>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Vec<u8>, StatusCode> {
     let value = redis
@@ -37,7 +38,7 @@ async fn get_response(
 }
 
 async fn insert_response(
-    Path(request_id): Path<String>,
+    Path(request_id): Path<Uuid>,
     Extension(mut redis): Extension<ConnectionManager>,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
@@ -50,7 +51,7 @@ async fn insert_response(
     }
 
     redis
-        .expire::<_, ()>(&request_id, EXPIRE_AFTER_SECONDS)
+        .expire::<_, ()>(&request_id.to_string(), EXPIRE_AFTER_SECONDS)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
