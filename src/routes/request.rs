@@ -1,7 +1,7 @@
 use axum::{
     extract::Path,
     http::{Method, StatusCode},
-    routing::head,
+    routing::{head, post},
     Extension, Json, Router,
 };
 use redis::{aio::ConnectionManager, AsyncCommands};
@@ -24,12 +24,11 @@ pub fn handler() -> Router {
         .allow_headers(AllowHeaders::any())
         .allow_methods([Method::PUT, Method::HEAD]);
 
+    Router::new().route("/request", post(insert_request).layer(cors));
+
     Router::new().route(
         "/request/:request_id",
-        head(has_request)
-            .get(get_request)
-            .put(insert_request)
-            .layer(cors),
+        head(has_request).get(get_request).layer(cors),
     )
 }
 
@@ -75,6 +74,8 @@ async fn insert_request(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<Request>,
 ) -> Result<StatusCode, StatusCode> {
+    let request_id = Uuid::new_v4();
+
     if !redis
         .set_nx::<_, _, bool>(
             format!("{REQ_PREFIX}{request_id}"),
