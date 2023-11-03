@@ -24,12 +24,12 @@ pub fn handler() -> Router {
         .allow_headers(AllowHeaders::any())
         .allow_methods([Method::PUT, Method::HEAD]);
 
-    Router::new().route("/request", post(insert_request).layer(cors));
-
-    Router::new().route(
-        "/request/:request_id",
-        head(has_request).get(get_request).layer(cors),
-    )
+    Router::new()
+        .route("/request", post(insert_request).layer(cors.clone()))
+        .route(
+            "/request/:request_id",
+            head(has_request).get(get_request).layer(cors),
+        )
 }
 
 async fn has_request(
@@ -70,7 +70,7 @@ async fn get_request(
 }
 
 async fn insert_request(
-    Path(request_id): Path<Uuid>,
+    // Path(request_id): Path<Uuid>,
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<Request>,
 ) -> Result<StatusCode, StatusCode> {
