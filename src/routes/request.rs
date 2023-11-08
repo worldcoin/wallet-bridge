@@ -8,13 +8,13 @@ use redis::{aio::ConnectionManager, AsyncCommands};
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
-use crate::{RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX};
+use crate::utils::{RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX};
 
 const REQ_PREFIX: &str = "req:";
 
 #[derive(Debug, serde::Serialize)]
 struct CustomResponse {
-    request_id: String,
+    request_id: Uuid,
 }
 
 pub fn handler() -> Router {
@@ -65,8 +65,8 @@ async fn get_request(
     }
 
     //ANCHOR - Update the status of the request
-    if !redis
-        .set_ex::<_, _, bool>(
+    redis
+        .set_ex::<_, _, ()>(
             format!("{REQ_STATUS_PREFIX}{request_id}"),
             RequestStatus::Retrieved.to_string(),
             EXPIRE_AFTER_SECONDS,
@@ -75,10 +75,7 @@ async fn get_request(
         .map_err(|e| {
             tracing::error!("Redis error: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
-        })?
-    {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
+        })?;
 
     serde_json::from_slice(&value.unwrap())
         .map_or(Err(StatusCode::INTERNAL_SERVER_ERROR), |value| {
@@ -93,8 +90,8 @@ async fn insert_request(
     let request_id = Uuid::new_v4();
 
     //ANCHOR - Set request status
-    if !redis
-        .set_ex::<_, _, bool>(
+    redis
+        .set_ex::<_, _, ()>(
             format!("{REQ_STATUS_PREFIX}{request_id}"),
             RequestStatus::Initialized.to_string(),
             EXPIRE_AFTER_SECONDS,
@@ -103,14 +100,11 @@ async fn insert_request(
         .map_err(|e| {
             tracing::error!("Redis error: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
-        })?
-    {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
+        })?;
 
     //ANCHOR - Store payload
-    if !redis
-        .set_ex::<_, _, bool>(
+    redis
+        .set_ex::<_, _, ()>(
             format!("{REQ_PREFIX}{request_id}"),
             serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             EXPIRE_AFTER_SECONDS,
@@ -119,12 +113,7 @@ async fn insert_request(
         .map_err(|e| {
             tracing::error!("Redis error: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
-        })?
-    {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
+        })?;
 
-    Ok(Json(CustomResponse {
-        request_id: request_id.to_string(),
-    }))
+    Ok(Json(CustomResponse { request_id }))
 }

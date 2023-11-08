@@ -3,27 +3,10 @@
 use dotenvy::dotenv;
 use redis::aio::ConnectionManager;
 use std::env;
-use strum_macros::{Display, EnumString};
 
 mod routes;
 mod server;
-
-const EXPIRE_AFTER_SECONDS: usize = 180;
-const REQ_STATUS_PREFIX: &str = "req:status:";
-
-#[derive(EnumString, Display, serde::Serialize, serde::Deserialize, Debug)]
-#[serde(rename_all = "lowercase")]
-pub enum RequestStatus {
-    Initialized,
-    Retrieved,
-    Completed,
-}
-
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct RequestPayload {
-    iv: String,
-    payload: String,
-}
+mod utils;
 
 #[tokio::main]
 async fn main() {

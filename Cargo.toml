@@ -15,8 +15,6 @@ serde_json = "1.0.107"
 tracing = { version = "0.1", features = ["log"] }
 tokio = { version = "1.31.0", features = ["full"] }
 serde = { version = "1.0.183", features = ["derive"] }
-strum = "0.25"
-strum_macros = "0.25"
 tower-http = { version = "0.4.3", features = ["cors"] }
 uuid = { version = "1.4.1", features = ["v4", "serde"] }
 redis = { version = "0.23.0", features = ["tokio-comp", "connection-manager"] }

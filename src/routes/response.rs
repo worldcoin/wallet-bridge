@@ -11,7 +11,9 @@ use std::str;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
-use crate::{RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX};
+use crate::utils::{
+    handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
+};
 
 const RES_PREFIX: &str = "res:";
 
@@ -41,50 +43,39 @@ async fn get_response(
     let value = redis
         .get_del::<_, Option<Vec<u8>>>(format!("{RES_PREFIX}{request_id}"))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(handle_redis_error)?;
 
-    if value.is_some() {
-        return serde_json::from_slice(&value.unwrap()).map_or(
+    if let Some(value) = value {
+        return serde_json::from_slice(&value).map_or(
             Err(StatusCode::INTERNAL_SERVER_ERROR),
             |value| {
                 Ok(Json(Response {
-                    status: RequestStatus::Completed,
                     response: value,
+                    status: RequestStatus::Completed,
                 }))
             },
         );
     }
 
     //ANCHOR - Return the current status for the request
-    let status_opt: Option<Vec<u8>> = redis
-        .get::<_, Option<Vec<u8>>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
+    let Some(status) = redis
+        .get::<_, Option<String>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
-        .map_err(|e| {
-            tracing::error!("Redis error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .map_err(handle_redis_error)?
+    else {
+        //ANCHOR - Request ID does not exist
+        return Err(StatusCode::NOT_FOUND);
+    };
 
-    if let Some(bytes) = status_opt {
-        let status_str = str::from_utf8(&bytes).map_err(|e| {
-            tracing::error!(
-                "Failed to convert bytes to string when fetching status from Redis: {}",
-                e
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        let status: RequestStatus = RequestStatus::from_str(status_str).map_err(|e| {
-            tracing::error!("Failed to parse status: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let status: RequestStatus = RequestStatus::from_str(&status).map_err(|e| {
+        tracing::error!("Failed to parse status: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-        return Ok(Json(Response {
-            status,
-            response: None,
-        }));
-    }
-
-    //ANCHOR - Request ID does not exist
-    return Err(StatusCode::NOT_FOUND);
+    Ok(Json(Response {
+        status,
+        response: None,
+    }))
 }
 
 async fn insert_response(
@@ -99,7 +90,7 @@ async fn insert_response(
             serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(handle_redis_error)?
     {
         return Ok(StatusCode::CONFLICT);
     }
@@ -114,10 +105,7 @@ async fn insert_response(
     redis
         .del::<_, Option<Vec<u8>>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
-        .map_err(|e| {
-            tracing::error!("Redis error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .map_err(handle_redis_error)?;
 
     Ok(StatusCode::CREATED)
 }
