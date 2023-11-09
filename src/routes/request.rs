@@ -8,7 +8,9 @@ use redis::{aio::ConnectionManager, AsyncCommands};
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
-use crate::utils::{RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX};
+use crate::utils::{
+    handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
+};
 
 const REQ_PREFIX: &str = "req:";
 
@@ -55,10 +57,7 @@ async fn get_request(
     let value = redis
         .get_del::<_, Option<Vec<u8>>>(format!("{REQ_PREFIX}{request_id}"))
         .await
-        .map_err(|e| {
-            tracing::error!("Redis error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .map_err(handle_redis_error)?;
 
     if value.is_none() {
         return Err(StatusCode::NOT_FOUND);
@@ -72,10 +71,7 @@ async fn get_request(
             EXPIRE_AFTER_SECONDS,
         )
         .await
-        .map_err(|e| {
-            tracing::error!("Redis error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .map_err(handle_redis_error)?;
 
     serde_json::from_slice(&value.unwrap())
         .map_or(Err(StatusCode::INTERNAL_SERVER_ERROR), |value| {
@@ -97,10 +93,7 @@ async fn insert_request(
             EXPIRE_AFTER_SECONDS,
         )
         .await
-        .map_err(|e| {
-            tracing::error!("Redis error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .map_err(handle_redis_error)?;
 
     //ANCHOR - Store payload
     redis
@@ -110,10 +103,7 @@ async fn insert_request(
             EXPIRE_AFTER_SECONDS,
         )
         .await
-        .map_err(|e| {
-            tracing::error!("Redis error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .map_err(handle_redis_error)?;
 
     Ok(Json(CustomResponse { request_id }))
 }
