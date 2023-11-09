@@ -6,8 +6,7 @@ use std::env;
 
 mod routes;
 mod server;
-
-const EXPIRE_AFTER_SECONDS: usize = 60;
+mod utils;
 
 #[tokio::main]
 async fn main() {
