@@ -11,11 +11,8 @@ use std::str;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
-use crate::{
-    axum::TemporaryForceDecodeJson,
-    utils::{
-        handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
-    },
+use crate::utils::{
+    handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
 };
 
 const RES_PREFIX: &str = "res:";
@@ -84,7 +81,7 @@ async fn get_response(
 async fn insert_response(
     Path(request_id): Path<Uuid>,
     Extension(mut redis): Extension<ConnectionManager>,
-    TemporaryForceDecodeJson(request): TemporaryForceDecodeJson<RequestPayload>,
+    Json(request): Json<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
     //ANCHOR - Store the response
     if !redis

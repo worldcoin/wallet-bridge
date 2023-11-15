@@ -21,9 +21,6 @@ redis = { version = "0.23.0", features = ["tokio-comp", "connection-manager"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt",
 ] }
-serde_path_to_error = "0.1.14"
-async-trait = "0.1.74"
-thiserror = "1.0.50"
 
 [build-dependencies]
 chrono = "0.4.26"

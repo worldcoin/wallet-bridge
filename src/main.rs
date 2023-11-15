@@ -4,7 +4,6 @@ use dotenvy::dotenv;
 use redis::aio::ConnectionManager;
 use std::env;
 
-mod axum;
 mod routes;
 mod server;
 mod utils;
