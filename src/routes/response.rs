@@ -86,27 +86,38 @@ async fn insert_response(
     Extension(mut redis): Extension<ConnectionManager>,
     TemporaryForceDecodeJson(request): TemporaryForceDecodeJson<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
-    //ANCHOR - Store the response
+    //ANCHOR - Check the request is valid
     if !redis
-        .set_nx::<_, _, bool>(
-            format!("{RES_PREFIX}{request_id}"),
-            serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-        )
+        .exists::<_, bool>(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
         .map_err(handle_redis_error)?
     {
-        return Ok(StatusCode::CONFLICT);
+        return Err(StatusCode::BAD_REQUEST);
     }
 
+    //ANCHOR - Check the response has not been set already
+    if redis
+        .exists::<_, bool>(format!("{RES_PREFIX}{request_id}"))
+        .await
+        .map_err(handle_redis_error)?
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    //ANCHOR - Store the response
     redis
-        .expire::<_, ()>(format!("{RES_PREFIX}{request_id}"), EXPIRE_AFTER_SECONDS)
+        .set_ex::<_, _, ()>(
+            format!("{RES_PREFIX}{request_id}"),
+            serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            EXPIRE_AFTER_SECONDS,
+        )
         .await
         .map_err(handle_redis_error)?;
 
     //ANCHOR - Delete status
-    //NOTE - We can delete the status now as the presence of a response implies the request is complete
+    //NOTE - We can delete the status at this point as the presence of a response implies the request is complete
     redis
-        .del::<_, Option<Vec<u8>>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .del(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
         .map_err(handle_redis_error)?;
 

@@ -39,3 +39,11 @@ H -- Response provided --> C
 - `GET /request/:id`: Called by World App. Used to fetch the proof verification request. One time use.
 - `PUT /response/:id`: Called by World App. Used to send the proof back to the application.
 - `GET /response/:id`: Called by IDKit. Continuous pulling to fetch the status of the request and the response if available. Response can only be retrieved once.
+
+## Local Development
+
+An easy way to run is using a Dockerized Redis:
+
+```
+docker run -d -p 6379:6379 redis
+```
