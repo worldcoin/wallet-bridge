@@ -99,9 +99,9 @@ async fn insert_response(
     }
 
     redis
-        .expire::<_, ()>(&request_id.to_string(), EXPIRE_AFTER_SECONDS)
+        .expire::<_, ()>(format!("{RES_PREFIX}{request_id}"), EXPIRE_AFTER_SECONDS)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(handle_redis_error)?;
 
     //ANCHOR - Delete status
     //NOTE - We can delete the status now as the presence of a response implies the request is complete
