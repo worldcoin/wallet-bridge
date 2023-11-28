@@ -14,7 +14,7 @@ async fn main() {
     dotenv().ok();
 
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::INFO)
         .with_target(false)
         .init();
 
@@ -22,11 +22,13 @@ async fn main() {
         .await
         .expect("Failed to connect to Redis");
 
+    println!("✅ Connection to Redis established.");
+
     server::start(redis).await;
 }
 
 async fn build_redis_pool(mut redis_url: String) -> redis::RedisResult<ConnectionManager> {
-    if !redis_url.starts_with("redis://") {
+    if !redis_url.starts_with("redis://") && !redis_url.starts_with("rediss://") {
         redis_url = format!("redis://{redis_url}");
     }
 

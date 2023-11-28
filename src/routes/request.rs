@@ -85,6 +85,8 @@ async fn insert_request(
 ) -> Result<Json<CustomResponse>, StatusCode> {
     let request_id = Uuid::new_v4();
 
+    tracing::info!("{}", format!("Processing /request: {request_id}"));
+
     //ANCHOR - Set request status
     redis
         .set_ex::<_, _, ()>(
@@ -104,6 +106,11 @@ async fn insert_request(
         )
         .await
         .map_err(handle_redis_error)?;
+
+    tracing::info!(
+        "{}",
+        format!("Successfully processed /request: {request_id}")
+    );
 
     Ok(Json(CustomResponse { request_id }))
 }
