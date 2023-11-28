@@ -17,6 +17,8 @@ async fn main() {
         .with_target(false)
         .init();
 
+    tracing::info!("Starting wallet bridge...");
+
     // Construct Redis URL
     let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| {
         let host = env::var("REDIS_HOST").expect("REDIS_URL or REDIS_HOST is required.");
@@ -44,7 +46,7 @@ async fn main() {
         .await
         .expect("Failed to connect to Redis");
 
-    println!("✅ Connection to Redis established.");
+    tracing::info!("✅ Connection to Redis established.");
 
     server::start(redis).await;
 }
