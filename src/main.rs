@@ -14,7 +14,10 @@ async fn main() {
 
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
+        .json()
         .with_target(false)
+        .flatten_event(true)
+        .without_time()
         .init();
 
     tracing::info!("Starting wallet bridge...");
