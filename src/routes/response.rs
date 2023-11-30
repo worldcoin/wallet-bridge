@@ -49,6 +49,10 @@ async fn get_response(
         return serde_json::from_slice(&value).map_or(
             Err(StatusCode::INTERNAL_SERVER_ERROR),
             |value| {
+                tracing::info!(
+                    "{}",
+                    format!("Successfully retrieved /response: {request_id}")
+                );
                 Ok(Json(Response {
                     response: value,
                     status: RequestStatus::Completed,
@@ -117,6 +121,8 @@ async fn insert_response(
         .del(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
         .map_err(handle_redis_error)?;
+
+    tracing::info!("{}", format!("Successfully stored /response: {request_id}"));
 
     Ok(StatusCode::CREATED)
 }
