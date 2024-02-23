@@ -8,16 +8,19 @@ repository = "https://github.com/worldcoin/wallet-bridge"
 description = "A bridge between the World ID SDK and the World App"
 
 [dependencies]
-axum = "0.6.20"
+axum = "0.7.4"
 tower = "0.4.13"
 dotenvy = "0.15.7"
 serde_json = "1.0.107"
 tracing = { version = "0.1", features = ["log"] }
 tokio = { version = "1.31.0", features = ["full"] }
 serde = { version = "1.0.183", features = ["derive"] }
-tower-http = { version = "0.4.3", features = ["cors"] }
+schemars = { version = "0.8.16", features = ["uuid1"] }
+tower-http = { version = "0.5.2", features = ["cors"] }
 uuid = { version = "1.4.1", features = ["v4", "serde"] }
-redis = { version = "0.23.0", features = ["tokio-comp", "connection-manager", "tokio-native-tls-comp"] }
+aide = { version = "0.13.2", features = ["axum", "scalar"] }
+axum-jsonschema = { version = "0.8.0", features = ["aide"] }
+redis = { version = "0.24.0", features = ["tokio-comp", "connection-manager", "tokio-native-tls-comp"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt","json"
 ] }

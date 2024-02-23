@@ -1,7 +1,9 @@
 use axum::{routing::get, Json, Router};
 
-pub fn handler() -> Router {
-    Router::new().route("/", get(get_info))
+pub fn handler() -> ApiRouter {
+    ApiRouter::new()
+        .route("/", get(get_info))
+        .route("/openapi.json", get(api_schema))
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -29,4 +31,9 @@ async fn get_info() -> Json<RootResponse> {
             rev: option_env!("GIT_REV").map(ToString::to_string),
         },
     })
+}
+
+#[allow(clippy::unused_async)]
+async fn api_schema(Extension(openapi): Extension<OpenApi>) -> Json<OpenApi> {
+    Json(openapi)
 }
