@@ -10,8 +10,11 @@ pub const REQ_STATUS_PREFIX: &str = "req:status:";
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestStatus {
+    /// The request has been initiated by the client
     Initialized,
+    /// The request has been retrieved by World App
     Retrieved,
+    /// The request has received a response from World App
     Completed,
 }
 
@@ -40,7 +43,9 @@ impl FromStr for RequestStatus {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
 pub struct RequestPayload {
+    /// The initialization vector for the encrypted payload
     iv: String,
+    /// The encrypted payload
     payload: String,
 }
 
