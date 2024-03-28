@@ -79,10 +79,17 @@ async fn get_request(
         .await
         .map_err(handle_redis_error)?;
 
-    serde_json::from_slice(&value.unwrap())
-        .map_or(Err(StatusCode::INTERNAL_SERVER_ERROR), |value| {
+    serde_json::from_slice(&value.unwrap()).map_or(
+        Err(StatusCode::INTERNAL_SERVER_ERROR),
+        |value| {
+            tracing::info!(
+                "{}",
+                format!("Successfully retrieved /request: {request_id}")
+            );
+
             Ok(Json(value))
-        })
+        },
+    )
 }
 
 /// Create a new request
@@ -114,10 +121,7 @@ async fn insert_request(
         .await
         .map_err(handle_redis_error)?;
 
-    tracing::info!(
-        "{}",
-        format!("Successfully processed /request: {request_id}")
-    );
+    tracing::info!("{}", format!("Successfully stored /request: {request_id}"));
 
     Ok(Json(RequestCreatedPayload { request_id }))
 }
