@@ -1,4 +1,5 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
+
 use dotenvy::dotenv;
 use redis::aio::ConnectionManager;
 use std::env;

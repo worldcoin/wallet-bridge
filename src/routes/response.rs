@@ -1,12 +1,14 @@
 use std::str::FromStr;
 
+use aide::axum::{routing::get, ApiRouter};
 use axum::{
     extract::Path,
     http::{Method, StatusCode},
-    routing::get,
-    Extension, Json, Router,
+    Extension,
 };
+use axum_jsonschema::Json;
 use redis::{aio::ConnectionManager, AsyncCommands};
+use schemars::JsonSchema;
 use std::str;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
@@ -17,19 +19,19 @@ use crate::utils::{
 
 const RES_PREFIX: &str = "res:";
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
 struct Response {
     status: RequestStatus,
     response: Option<RequestPayload>,
 }
 
-pub fn handler() -> Router {
+pub fn handler() -> ApiRouter {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_headers(AllowHeaders::any())
         .allow_methods([Method::GET, Method::PUT]); //TODO: PUT is required by the simulator but should not be included
 
-    Router::new().route(
+    ApiRouter::new().api_route(
         "/response/:request_id",
         get(get_response).put(insert_response).layer(cors),
     )

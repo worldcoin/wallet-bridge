@@ -2,15 +2,19 @@ use std::{fmt::Display, str::FromStr};
 
 use axum::http::StatusCode;
 use redis::RedisError;
+use schemars::JsonSchema;
 
-pub const EXPIRE_AFTER_SECONDS: usize = 180;
+pub const EXPIRE_AFTER_SECONDS: u64 = 180;
 pub const REQ_STATUS_PREFIX: &str = "req:status:";
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestStatus {
+    /// The request has been initiated by the client
     Initialized,
+    /// The request has been retrieved by World App
     Retrieved,
+    /// The request has received a response from World App
     Completed,
 }
 
@@ -37,9 +41,11 @@ impl FromStr for RequestStatus {
     }
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
 pub struct RequestPayload {
+    /// The initialization vector for the encrypted payload
     iv: String,
+    /// The encrypted payload
     payload: String,
 }
 

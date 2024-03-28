@@ -1,10 +1,15 @@
+use aide::axum::{
+    routing::{head, post},
+    ApiRouter,
+};
 use axum::{
     extract::Path,
     http::{Method, StatusCode},
-    routing::{head, post},
-    Extension, Json, Router,
+    Extension,
 };
+use axum_jsonschema::Json;
 use redis::{aio::ConnectionManager, AsyncCommands};
+use schemars::JsonSchema;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
@@ -14,21 +19,22 @@ use crate::utils::{
 
 const REQ_PREFIX: &str = "req:";
 
-#[derive(Debug, serde::Serialize)]
-struct CustomResponse {
+#[derive(Debug, serde::Serialize, JsonSchema)]
+struct RequestCreatedPayload {
+    /// The unique identifier for the request
     request_id: Uuid,
 }
 
-pub fn handler() -> Router {
+pub fn handler() -> ApiRouter {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_headers(AllowHeaders::any())
         .allow_methods([Method::POST, Method::HEAD]);
 
     // You must chain the routes to the same Router instance
-    Router::new()
-        .route("/request", post(insert_request))
-        .route("/request/:request_id", head(has_request).get(get_request))
+    ApiRouter::new()
+        .api_route("/request", post(insert_request))
+        .api_route("/request/:request_id", head(has_request).get(get_request))
         .layer(cors) // Apply the CORS layer to all routes
 }
 
@@ -79,10 +85,11 @@ async fn get_request(
         })
 }
 
+/// Create a new request
 async fn insert_request(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<RequestPayload>,
-) -> Result<Json<CustomResponse>, StatusCode> {
+) -> Result<Json<RequestCreatedPayload>, StatusCode> {
     let request_id = Uuid::new_v4();
 
     tracing::info!("{}", format!("Processing /request: {request_id}"));
@@ -112,5 +119,5 @@ async fn insert_request(
         format!("Successfully processed /request: {request_id}")
     );
 
-    Ok(Json(CustomResponse { request_id }))
+    Ok(Json(RequestCreatedPayload { request_id }))
 }
