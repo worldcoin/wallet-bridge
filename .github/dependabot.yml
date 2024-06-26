@@ -5,7 +5,7 @@ updates:
     schedule:
       interval: "monthly"
     reviewers:
-      - "@m1guelpf"
-      - "@andy-t-wang"
+      - "m1guelpf"
+      - "andy-t-wang"
     assignees:
-      - "@m1guelpf"
+      - "m1guelpf"
