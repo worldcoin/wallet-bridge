@@ -26,4 +26,4 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 ] }
 
 [build-dependencies]
-chrono = "0.4.26"
+chrono = "0.4.38"
