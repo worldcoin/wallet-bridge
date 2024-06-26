@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    reviewers:
+      - "@m1guelpf"
+      - "@andy-t-wang"
+    assignees:
+      - "@m1guelpf"
