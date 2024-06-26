@@ -63,11 +63,8 @@ async fn get_request(
     let value = redis
         .get_del::<_, Option<Vec<u8>>>(format!("{REQ_PREFIX}{request_id}"))
         .await
-        .map_err(handle_redis_error)?;
-
-    if value.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+        .map_err(handle_redis_error)?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     //ANCHOR - Update the status of the request
     redis
