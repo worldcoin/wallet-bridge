@@ -116,7 +116,7 @@ async fn insert_response(
     //ANCHOR - Delete status
     //NOTE - We can delete the status at this point as the presence of a response implies the request is complete
     redis
-        .del(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .del::<_, ()>(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
         .map_err(handle_redis_error)?;
 

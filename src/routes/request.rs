@@ -76,10 +76,9 @@ async fn get_request(
         .await
         .map_err(handle_redis_error)?;
 
-    serde_json::from_slice(&value.unwrap())
-        .map_or(Err(StatusCode::INTERNAL_SERVER_ERROR), |value| {
-            Ok(Json(value))
-        })
+    serde_json::from_slice(&value).map_or(Err(StatusCode::INTERNAL_SERVER_ERROR), |value| {
+        Ok(Json(value))
+    })
 }
 
 /// Create a new request

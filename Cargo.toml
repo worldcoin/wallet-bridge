@@ -20,9 +20,14 @@ tower-http = { version = "0.5.2", features = ["cors"] }
 uuid = { version = "1.4.1", features = ["v4", "serde"] }
 aide = { version = "0.13.2", features = ["axum", "scalar"] }
 axum-jsonschema = { version = "0.8.0", features = ["aide"] }
-redis = { version = "0.24.0", features = ["tokio-comp", "connection-manager", "tokio-native-tls-comp"] }
+redis = { version = "0.25.4", features = [
+    "tokio-comp",
+    "connection-manager",
+    "tokio-native-tls-comp",
+] }
 tracing-subscriber = { version = "0.3", default-features = false, features = [
-    "fmt","json"
+    "fmt",
+    "json",
 ] }
 
 [build-dependencies]
