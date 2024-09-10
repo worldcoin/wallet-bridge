@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 use redis::RedisError;
 use schemars::JsonSchema;
 
-pub const EXPIRE_AFTER_SECONDS: u64 = 180;
+pub const EXPIRE_AFTER_SECONDS: u64 = 60;
 pub const REQ_STATUS_PREFIX: &str = "req:status:";
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, JsonSchema)]
