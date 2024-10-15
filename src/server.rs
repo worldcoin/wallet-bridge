@@ -1,7 +1,7 @@
 use std::{env, net::SocketAddr};
 
 use aide::openapi::{Info, License, OpenApi};
-use axum::Extension;
+use axum::{extract::DefaultBodyLimit, Extension};
 use redis::aio::ConnectionManager;
 use tokio::net::TcpListener;
 
@@ -27,7 +27,8 @@ pub async fn start(redis: ConnectionManager) {
     let app = routes::handler()
         .finish_api(&mut openapi)
         .layer(Extension(redis))
-        .layer(Extension(openapi));
+        .layer(Extension(openapi))
+        .layer(DefaultBodyLimit::max(5 * 1024 * 1024));
 
     let address = SocketAddr::from((
         [0, 0, 0, 0],
