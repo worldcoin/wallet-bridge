@@ -11,7 +11,7 @@ description = "A bridge between the World ID SDK and the World App"
 axum = "0.7.7"
 tower = "0.5.1"
 dotenvy = "0.15.7"
-serde_json = "1.0.128"
+serde_json = "1.0.132"
 tracing = { version = "0.1", features = ["log"] }
 tokio = { version = "1.40.0", features = ["full"] }
 serde = { version = "1.0.210", features = ["derive"] }
