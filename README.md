@@ -4,7 +4,7 @@
 
 An end-to-end encrypted bridge between the World ID SDK and World App. This bridge is used to pass zero-knowledge proofs for World ID verifications.
 
-More details in the [docs](https://docs.worldcoin.org/further-reading/protocol-internals).
+More details in the [docs](https://docs.world.org/world-id/further-reading/protocol-internals).
 
 ## Flow
 
