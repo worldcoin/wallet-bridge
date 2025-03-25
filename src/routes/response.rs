@@ -73,6 +73,7 @@ async fn get_response(
         );
     }
 
+    //ANCHOR - Return the current status for the request
     // If no response exists, use the status we already got from the transaction
     let Some(status) = status else {
         return Err(StatusCode::NOT_FOUND);

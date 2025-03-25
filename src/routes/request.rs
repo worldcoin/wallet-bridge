@@ -87,7 +87,11 @@ async fn get_request(
         .await
         .map_err(handle_redis_error)?;
 
-    tracing::info!("Request {request_id} state transition: {} -> {}", current_status, RequestStatus::Retrieved);
+    tracing::info!(
+        "Request {request_id} state transition: {} -> {}",
+        current_status,
+        RequestStatus::Retrieved
+    );
 
     serde_json::from_slice(&value).map_or(Err(StatusCode::INTERNAL_SERVER_ERROR), |value| {
         Ok(Json(value))
@@ -113,7 +117,10 @@ async fn insert_request(
         .await
         .map_err(handle_redis_error)?;
 
-    tracing::info!("Request {request_id} state transition: new -> {}", RequestStatus::Initialized);
+    tracing::info!(
+        "Request {request_id} state transition: new -> {}",
+        RequestStatus::Initialized
+    );
 
     //ANCHOR - Store payload
     redis
