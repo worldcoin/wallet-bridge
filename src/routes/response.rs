@@ -41,13 +41,27 @@ async fn get_response(
     Path(request_id): Path<Uuid>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Json<Response>, StatusCode> {
-    //ANCHOR - Return the response if available
-    let value = redis
-        .get_del::<_, Option<Vec<u8>>>(format!("{RES_PREFIX}{request_id}"))
+    // Use a transaction to get both status and response atomically
+    let mut pipe = redis::pipe();
+    pipe.get(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .get_del(format!("{RES_PREFIX}{request_id}"));
+
+    let (status, value): (Option<String>, Option<Vec<u8>>) = pipe
+        .query_async(&mut redis)
         .await
         .map_err(handle_redis_error)?;
 
     if let Some(value) = value {
+        let current_status = status
+            .and_then(|s| RequestStatus::from_str(&s).ok())
+            .unwrap_or(RequestStatus::Retrieved);
+
+        tracing::info!(
+            "Request {request_id} state transition: {} -> {}",
+            current_status,
+            RequestStatus::Completed
+        );
+
         return serde_json::from_slice(&value).map_or(
             Err(StatusCode::INTERNAL_SERVER_ERROR),
             |value| {
@@ -59,13 +73,8 @@ async fn get_response(
         );
     }
 
-    //ANCHOR - Return the current status for the request
-    let Some(status) = redis
-        .get::<_, Option<String>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
-        .await
-        .map_err(handle_redis_error)?
-    else {
-        //ANCHOR - Request ID does not exist
+    // If no response exists, use the status we already got from the transaction
+    let Some(status) = status else {
         return Err(StatusCode::NOT_FOUND);
     };
 
@@ -86,13 +95,15 @@ async fn insert_response(
     Json(request): Json<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
     //ANCHOR - Check the request is valid
-    if !redis
-        .exists::<_, bool>(format!("{REQ_STATUS_PREFIX}{request_id}"))
+    let current_status = redis
+        .get::<_, Option<String>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
         .map_err(handle_redis_error)?
-    {
+        .and_then(|s| RequestStatus::from_str(&s).ok());
+
+    let Some(current_status) = current_status else {
         return Err(StatusCode::BAD_REQUEST);
-    }
+    };
 
     //ANCHOR - Check the response has not been set already
     if redis
@@ -112,6 +123,12 @@ async fn insert_response(
         )
         .await
         .map_err(handle_redis_error)?;
+
+    tracing::info!(
+        "Request {request_id} state transition: {} -> {}",
+        current_status,
+        RequestStatus::Completed
+    );
 
     //ANCHOR - Delete status
     //NOTE - We can delete the status at this point as the presence of a response implies the request is complete

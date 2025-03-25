@@ -10,6 +10,7 @@ use axum::{
 use axum_jsonschema::Json;
 use redis::{aio::ConnectionManager, AsyncCommands};
 use schemars::JsonSchema;
+use std::str::FromStr;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
@@ -60,11 +61,21 @@ async fn get_request(
     Path(request_id): Path<Uuid>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Json<RequestPayload>, StatusCode> {
-    let value = redis
-        .get_del::<_, Option<Vec<u8>>>(format!("{REQ_PREFIX}{request_id}"))
+    // Use a transaction to get both status and request data atomically
+    let mut pipe = redis::pipe();
+    pipe.get(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .get_del(format!("{REQ_PREFIX}{request_id}"));
+
+    let (status, value): (Option<String>, Option<Vec<u8>>) = pipe
+        .query_async(&mut redis)
         .await
-        .map_err(handle_redis_error)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(handle_redis_error)?;
+
+    let current_status = status
+        .and_then(|s| RequestStatus::from_str(&s).ok())
+        .unwrap_or(RequestStatus::Initialized);
+
+    let value = value.ok_or(StatusCode::NOT_FOUND)?;
 
     //ANCHOR - Update the status of the request
     redis
@@ -75,6 +86,8 @@ async fn get_request(
         )
         .await
         .map_err(handle_redis_error)?;
+
+    tracing::info!("Request {request_id} state transition: {} -> {}", current_status, RequestStatus::Retrieved);
 
     serde_json::from_slice(&value).map_or(Err(StatusCode::INTERNAL_SERVER_ERROR), |value| {
         Ok(Json(value))
@@ -88,7 +101,7 @@ async fn insert_request(
 ) -> Result<Json<RequestCreatedPayload>, StatusCode> {
     let request_id = Uuid::new_v4();
 
-    tracing::info!("{}", format!("Processing /request: {request_id}"));
+    tracing::info!("Processing /request: {request_id}");
 
     //ANCHOR - Set request status
     redis
@@ -99,6 +112,8 @@ async fn insert_request(
         )
         .await
         .map_err(handle_redis_error)?;
+
+    tracing::info!("Request {request_id} state transition: new -> {}", RequestStatus::Initialized);
 
     //ANCHOR - Store payload
     redis
