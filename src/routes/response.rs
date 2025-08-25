@@ -95,6 +95,28 @@ async fn insert_response(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
+    //ANCHOR - Atomically store the response if not already set (idempotent)
+    let created = redis
+        .set_nx::<_, _, bool>(
+            format!("{RES_PREFIX}{request_id}"),
+            serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        )
+        .await
+        .map_err(handle_redis_error)?;
+
+    if !created {
+        return Ok(StatusCode::CONFLICT);
+    }
+
+    //ANCHOR - Set expiration on the response key
+    redis
+        .expire::<_, ()>(
+            format!("{RES_PREFIX}{request_id}"),
+            EXPIRE_AFTER_SECONDS as i64,
+        )
+        .await
+        .map_err(handle_redis_error)?;
+
     //ANCHOR - Check the request is valid
     let current_status = redis
         .get::<_, Option<String>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
@@ -105,25 +127,6 @@ async fn insert_response(
     let Some(current_status) = current_status else {
         return Err(StatusCode::BAD_REQUEST);
     };
-
-    //ANCHOR - Check the response has not been set already
-    if redis
-        .exists::<_, bool>(format!("{RES_PREFIX}{request_id}"))
-        .await
-        .map_err(handle_redis_error)?
-    {
-        return Err(StatusCode::CONFLICT);
-    }
-
-    //ANCHOR - Store the response
-    redis
-        .set_ex::<_, _, ()>(
-            format!("{RES_PREFIX}{request_id}"),
-            serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-            EXPIRE_AFTER_SECONDS,
-        )
-        .await
-        .map_err(handle_redis_error)?;
 
     tracing::info!(
         "Request {request_id} state transition: {} -> {}",

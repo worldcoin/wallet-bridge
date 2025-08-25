@@ -15,7 +15,8 @@ use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::utils::{
-    handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
+    handle_redis_error, PutRequestPayload, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS,
+    REQ_STATUS_PREFIX,
 };
 
 const REQ_PREFIX: &str = "req:";
@@ -30,12 +31,15 @@ pub fn handler() -> ApiRouter {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_headers(AllowHeaders::any())
-        .allow_methods([Method::POST, Method::HEAD]);
+        .allow_methods([Method::POST, Method::HEAD, Method::PUT]);
 
     // You must chain the routes to the same Router instance
     ApiRouter::new()
         .api_route("/request", post(insert_request))
-        .api_route("/request/:request_id", head(has_request).get(get_request))
+        .api_route(
+            "/request/:request_id",
+            head(has_request).get(get_request).put(put_request),
+        )
         .layer(cors) // Apply the CORS layer to all routes
 }
 
@@ -138,4 +142,56 @@ async fn insert_request(
     );
 
     Ok(Json(RequestCreatedPayload { request_id }))
+}
+
+async fn put_request(
+    Extension(mut redis): Extension<ConnectionManager>,
+    Json(request): Json<PutRequestPayload>,
+) -> Result<StatusCode, StatusCode> {
+    tracing::info!("Processing PUT /request: {0}", request.id);
+
+    //ANCHOR - Store payload only if it does not already exist (idempotent)
+    let created = redis
+        .set_nx::<_, _, bool>(
+            format!("{REQ_PREFIX}{0}", request.id),
+            serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        )
+        .await
+        .map_err(handle_redis_error)?;
+
+    if !created {
+        return Ok(StatusCode::CONFLICT);
+    }
+
+    //ANCHOR - Set expiration on the payload key
+    redis
+        .expire::<_, ()>(
+            format!("{REQ_PREFIX}{0}", request.id),
+            EXPIRE_AFTER_SECONDS as i64,
+        )
+        .await
+        .map_err(handle_redis_error)?;
+
+    //ANCHOR - Set request status (only after successful creation)
+    redis
+        .set_ex::<_, _, ()>(
+            format!("{REQ_STATUS_PREFIX}{0}", request.id),
+            RequestStatus::Initialized.to_string(),
+            EXPIRE_AFTER_SECONDS,
+        )
+        .await
+        .map_err(handle_redis_error)?;
+
+    tracing::info!(
+        "Request {0} state transition: new -> {1}",
+        request.id,
+        RequestStatus::Initialized
+    );
+
+    tracing::info!(
+        "{}",
+        format!("Successfully processed /request: {0}", request.id)
+    );
+
+    Ok(StatusCode::CREATED)
 }
