@@ -9,6 +9,7 @@ use axum::{
 use axum_jsonschema::Json;
 use redis::{aio::ConnectionManager, AsyncCommands};
 use schemars::JsonSchema;
+use std::env;
 use std::str;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
@@ -95,6 +96,17 @@ async fn insert_response(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
+    //ANCHOR - Check the request is valid
+    let current_status = redis
+        .get::<_, Option<String>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .await
+        .map_err(handle_redis_error)?
+        .and_then(|s| RequestStatus::from_str(&s).ok());
+
+    let Some(current_status) = current_status else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+
     //ANCHOR - Atomically store the response if not already set (idempotent)
     let created = redis
         .set_nx::<_, _, bool>(
@@ -116,17 +128,6 @@ async fn insert_response(
         )
         .await
         .map_err(handle_redis_error)?;
-
-    //ANCHOR - Check the request is valid
-    let current_status = redis
-        .get::<_, Option<String>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
-        .await
-        .map_err(handle_redis_error)?
-        .and_then(|s| RequestStatus::from_str(&s).ok());
-
-    let Some(current_status) = current_status else {
-        return Err(StatusCode::BAD_REQUEST);
-    };
 
     tracing::info!(
         "Request {request_id} state transition: {} -> {}",
