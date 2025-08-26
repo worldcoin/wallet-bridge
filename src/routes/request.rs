@@ -1,5 +1,5 @@
 use aide::axum::{
-    routing::{head, post},
+    routing::{head, post, put},
     ApiRouter,
 };
 use axum::{
@@ -34,14 +34,20 @@ pub fn handler() -> ApiRouter {
         .allow_headers(AllowHeaders::any())
         .allow_methods([Method::POST, Method::HEAD, Method::PUT]);
 
-    // You must chain the routes to the same Router instance
-    ApiRouter::new()
+    let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "unknown".to_string());
+
+    // Base routes
+    let mut router = ApiRouter::new()
         .api_route("/request", post(insert_request))
-        .api_route(
-            "/request/:request_id",
-            head(has_request).get(get_request).put(put_request),
-        )
-        .layer(cors) // Apply the CORS layer to all routes
+        .api_route("/request/:request_id", head(has_request).get(get_request))
+        .layer(cors);
+
+    // Only enable PUT in staging
+    if environment.trim().to_lowercase() == "staging" {
+        router = router.api_route("/request/:request_id", put(put_request));
+    }
+
+    router
 }
 
 async fn has_request(
@@ -149,13 +155,6 @@ async fn put_request(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<PutRequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
-    // Only allow PUT requests in staging environment
-    let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "unknown".to_string());
-    if environment.trim().to_lowercase() != "staging" {
-        tracing::warn!("PUT /request blocked in {} environment", environment);
-        return Err(StatusCode::FORBIDDEN);
-    }
-
     tracing::info!("Processing PUT /request: {0}", request.id);
 
     //ANCHOR - Store payload only if it does not already exist (idempotent)
@@ -173,7 +172,22 @@ async fn put_request(
         .map_err(handle_redis_error)?;
 
     if set_ok.is_none() {
-        return Ok(StatusCode::CONFLICT);
+        // Key already exists: refresh TTLs and treat as success
+        redis
+            .expire::<_, ()>(
+                format!("{REQ_PREFIX}{0}", request.id),
+                EXPIRE_AFTER_SECONDS as i64,
+            )
+            .await
+            .map_err(handle_redis_error)?;
+        // Refresh status TTL if present; do not overwrite value/state
+        let _ = redis
+            .expire::<_, ()>(
+                format!("{REQ_STATUS_PREFIX}{0}", request.id),
+                EXPIRE_AFTER_SECONDS as i64,
+            )
+            .await;
+        return Ok(StatusCode::OK);
     }
 
     //ANCHOR - Set request status (only after successful creation)
