@@ -1,5 +1,5 @@
 use aide::axum::{
-    routing::{head, post},
+    routing::{head, post, put},
     ApiRouter,
 };
 use axum::{
@@ -10,6 +10,7 @@ use axum::{
 use axum_jsonschema::Json;
 use redis::{aio::ConnectionManager, AsyncCommands};
 use schemars::JsonSchema;
+use std::env;
 use std::str::FromStr;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
@@ -30,13 +31,25 @@ pub fn handler() -> ApiRouter {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_headers(AllowHeaders::any())
-        .allow_methods([Method::POST, Method::HEAD]);
+        .allow_methods([Method::POST, Method::HEAD, Method::PUT]);
 
-    // You must chain the routes to the same Router instance
-    ApiRouter::new()
+    let environment = env::var("ENVIRONMENT")
+        .unwrap_or_else(|_| "unknown".to_string())
+        .trim()
+        .to_lowercase();
+
+    // Base routes
+    let mut router = ApiRouter::new()
         .api_route("/request", post(insert_request))
         .api_route("/request/:request_id", head(has_request).get(get_request))
-        .layer(cors) // Apply the CORS layer to all routes
+        .layer(cors);
+
+    // Only enable PUT in staging
+    if environment == "staging" {
+        router = router.api_route("/request/:request_id", put(put_request));
+    }
+
+    router
 }
 
 async fn has_request(
@@ -107,6 +120,39 @@ async fn insert_request(
 
     tracing::info!("Processing /request: {request_id}");
 
+    persist_request(&mut redis, request_id, &request).await?;
+
+    tracing::info!(
+        "{}",
+        format!("Successfully processed /request: {request_id}")
+    );
+
+    Ok(Json(RequestCreatedPayload { request_id }))
+}
+
+/// Create a new request by ID idempotently — retries succeed, even if the request exits
+/// Note: only enabled in staging
+async fn put_request(
+    Path(request_id): Path<Uuid>,
+    Extension(mut redis): Extension<ConnectionManager>,
+    Json(request): Json<RequestPayload>,
+) -> Result<StatusCode, StatusCode> {
+    tracing::info!("Processing PUT /request: {request_id}");
+
+    // Same logic as post, but always overwrites the existing payload, set status, and reset the TTL
+    persist_request(&mut redis, request_id, &request).await?;
+
+    tracing::info!("Successfully PUT /request: {request_id}");
+
+    Ok(StatusCode::CREATED)
+}
+
+/// Persist request payload and initialize status with TTL
+async fn persist_request(
+    redis: &mut ConnectionManager,
+    request_id: Uuid,
+    request: &RequestPayload,
+) -> Result<(), StatusCode> {
     //ANCHOR - Set request status
     redis
         .set_ex::<_, _, ()>(
@@ -132,10 +178,5 @@ async fn insert_request(
         .await
         .map_err(handle_redis_error)?;
 
-    tracing::info!(
-        "{}",
-        format!("Successfully processed /request: {request_id}")
-    );
-
-    Ok(Json(RequestCreatedPayload { request_id }))
+    Ok(())
 }
