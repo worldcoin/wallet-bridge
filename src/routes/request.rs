@@ -10,6 +10,7 @@ use axum::{
 use axum_jsonschema::Json;
 use redis::{aio::ConnectionManager, AsyncCommands};
 use schemars::JsonSchema;
+use std::env;
 use std::str::FromStr;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
@@ -148,6 +149,13 @@ async fn put_request(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<PutRequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
+    // Only allow PUT requests in staging environment
+    let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "unknown".to_string());
+    if environment.trim().to_lowercase() != "staging" {
+        tracing::warn!("PUT /request blocked in {} environment", environment);
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     tracing::info!("Processing PUT /request: {0}", request.id);
 
     //ANCHOR - Store payload only if it does not already exist (idempotent)
