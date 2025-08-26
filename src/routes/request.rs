@@ -8,7 +8,7 @@ use axum::{
     Extension,
 };
 use axum_jsonschema::Json;
-use redis::{aio::ConnectionManager, AsyncCommands};
+use redis::{aio::ConnectionManager, AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 use schemars::JsonSchema;
 use std::env;
 use std::str::FromStr;
@@ -159,26 +159,22 @@ async fn put_request(
     tracing::info!("Processing PUT /request: {0}", request.id);
 
     //ANCHOR - Store payload only if it does not already exist (idempotent)
-    let created = redis
-        .set_nx::<_, _, bool>(
+    let options = SetOptions::default()
+        .conditional_set(ExistenceCheck::NX)
+        .with_expiration(SetExpiry::EX(EXPIRE_AFTER_SECONDS));
+
+    let set_ok: Option<String> = redis
+        .set_options(
             format!("{REQ_PREFIX}{0}", request.id),
             serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            options,
         )
         .await
         .map_err(handle_redis_error)?;
 
-    if !created {
+    if set_ok.is_none() {
         return Ok(StatusCode::CONFLICT);
     }
-
-    //ANCHOR - Set expiration on the payload key
-    redis
-        .expire::<_, ()>(
-            format!("{REQ_PREFIX}{0}", request.id),
-            EXPIRE_AFTER_SECONDS as i64,
-        )
-        .await
-        .map_err(handle_redis_error)?;
 
     //ANCHOR - Set request status (only after successful creation)
     redis

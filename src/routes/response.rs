@@ -7,9 +7,8 @@ use axum::{
     Extension,
 };
 use axum_jsonschema::Json;
-use redis::{aio::ConnectionManager, AsyncCommands};
+use redis::{aio::ConnectionManager, AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 use schemars::JsonSchema;
-use std::env;
 use std::str;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
@@ -107,27 +106,23 @@ async fn insert_response(
         return Err(StatusCode::BAD_REQUEST);
     };
 
-    //ANCHOR - Atomically store the response if not already set (idempotent)
-    let created = redis
-        .set_nx::<_, _, bool>(
+    //ANCHOR - Atomically store the response with TTL if not already set (idempotent)
+    let options = SetOptions::default()
+        .conditional_set(ExistenceCheck::NX)
+        .with_expiration(SetExpiry::EX(EXPIRE_AFTER_SECONDS));
+
+    let set_ok: Option<String> = redis
+        .set_options(
             format!("{RES_PREFIX}{request_id}"),
             serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            options,
         )
         .await
         .map_err(handle_redis_error)?;
 
-    if !created {
+    if set_ok.is_none() {
         return Ok(StatusCode::CONFLICT);
     }
-
-    //ANCHOR - Set expiration on the response key
-    redis
-        .expire::<_, ()>(
-            format!("{RES_PREFIX}{request_id}"),
-            EXPIRE_AFTER_SECONDS as i64,
-        )
-        .await
-        .map_err(handle_redis_error)?;
 
     tracing::info!(
         "Request {request_id} state transition: {} -> {}",
