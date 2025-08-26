@@ -16,8 +16,7 @@ use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::utils::{
-    handle_redis_error, PutRequestPayload, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS,
-    REQ_STATUS_PREFIX,
+    handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
 };
 
 const REQ_PREFIX: &str = "req:";
@@ -152,10 +151,11 @@ async fn insert_request(
 }
 
 async fn put_request(
+    Path(request_id): Path<Uuid>,
     Extension(mut redis): Extension<ConnectionManager>,
-    Json(request): Json<PutRequestPayload>,
+    Json(request): Json<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
-    tracing::info!("Processing PUT /request: {0}", request.id);
+    tracing::info!("Processing PUT /request: {request_id}");
 
     //ANCHOR - Store payload only if it does not already exist (idempotent)
     let options = SetOptions::default()
@@ -164,7 +164,7 @@ async fn put_request(
 
     let set_ok: Option<String> = redis
         .set_options(
-            format!("{REQ_PREFIX}{0}", request.id),
+            format!("{REQ_PREFIX}{request_id}"),
             serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             options,
         )
@@ -175,7 +175,7 @@ async fn put_request(
         // Key already exists: refresh TTLs and treat as success
         redis
             .expire::<_, ()>(
-                format!("{REQ_PREFIX}{0}", request.id),
+                format!("{REQ_PREFIX}{request_id}"),
                 EXPIRE_AFTER_SECONDS as i64,
             )
             .await
@@ -183,7 +183,7 @@ async fn put_request(
         // Refresh status TTL if present; do not overwrite value/state
         let _ = redis
             .expire::<_, ()>(
-                format!("{REQ_STATUS_PREFIX}{0}", request.id),
+                format!("{REQ_STATUS_PREFIX}{request_id}"),
                 EXPIRE_AFTER_SECONDS as i64,
             )
             .await;
@@ -193,7 +193,7 @@ async fn put_request(
     //ANCHOR - Set request status (only after successful creation)
     redis
         .set_ex::<_, _, ()>(
-            format!("{REQ_STATUS_PREFIX}{0}", request.id),
+            format!("{REQ_STATUS_PREFIX}{request_id}"),
             RequestStatus::Initialized.to_string(),
             EXPIRE_AFTER_SECONDS,
         )
@@ -201,15 +201,11 @@ async fn put_request(
         .map_err(handle_redis_error)?;
 
     tracing::info!(
-        "Request {0} state transition: new -> {1}",
-        request.id,
+        "Request {request_id} state transition: new -> {0}",
         RequestStatus::Initialized
     );
 
-    tracing::info!(
-        "{}",
-        format!("Successfully processed /request: {0}", request.id)
-    );
+    tracing::info!("Successfully processed /request: {request_id}");
 
     Ok(StatusCode::CREATED)
 }

@@ -49,15 +49,6 @@ pub struct RequestPayload {
     payload: String,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct PutRequestPayload {
-    /// Client-specified request id
-    pub(crate) id: String,
-    /// IV and encrypted payload
-    #[serde(flatten)]
-    payload: RequestPayload,
-}
-
 #[allow(clippy::needless_pass_by_value)]
 pub fn handle_redis_error(e: RedisError) -> StatusCode {
     tracing::error!("Redis error: {e}");
