@@ -142,7 +142,7 @@ async fn put_request(
     // Same logic as post, but always overwrites the existing payload, set status, and reset the TTL
     persist_request(&mut redis, request_id, &request).await?;
 
-    tracing::info!("Successfully processed /request: {request_id}");
+    tracing::info!("Successfully PUT /request: {request_id}");
 
     Ok(StatusCode::CREATED)
 }
@@ -153,7 +153,7 @@ async fn persist_request(
     request_id: Uuid,
     request: &RequestPayload,
 ) -> Result<(), StatusCode> {
-    // Set request status
+    //ANCHOR - Set request status
     redis
         .set_ex::<_, _, ()>(
             format!("{REQ_STATUS_PREFIX}{request_id}"),
@@ -168,7 +168,7 @@ async fn persist_request(
         RequestStatus::Initialized
     );
 
-    // Store payload
+    //ANCHOR - Store payload
     redis
         .set_ex::<_, _, ()>(
             format!("{REQ_PREFIX}{request_id}"),
