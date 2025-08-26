@@ -121,7 +121,7 @@ async fn insert_response(
         .map_err(handle_redis_error)?;
 
     if set_ok.is_none() {
-        return Ok(StatusCode::CONFLICT);
+        return Err(StatusCode::CONFLICT);
     }
 
     tracing::info!(

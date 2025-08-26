@@ -8,7 +8,7 @@ use axum::{
     Extension,
 };
 use axum_jsonschema::Json;
-use redis::{aio::ConnectionManager, AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
+use redis::{aio::ConnectionManager, AsyncCommands};
 use schemars::JsonSchema;
 use std::env;
 use std::str::FromStr;
@@ -33,7 +33,10 @@ pub fn handler() -> ApiRouter {
         .allow_headers(AllowHeaders::any())
         .allow_methods([Method::POST, Method::HEAD, Method::PUT]);
 
-    let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "unknown".to_string());
+    let environment = env::var("ENVIRONMENT")
+        .unwrap_or_else(|_| "unknown".to_string())
+        .trim()
+        .to_lowercase();
 
     // Base routes
     let mut router = ApiRouter::new()
@@ -42,7 +45,7 @@ pub fn handler() -> ApiRouter {
         .layer(cors);
 
     // Only enable PUT in staging
-    if environment.trim().to_lowercase() == "staging" {
+    if environment == "staging" {
         router = router.api_route("/request/:request_id", put(put_request));
     }
 
@@ -117,7 +120,40 @@ async fn insert_request(
 
     tracing::info!("Processing /request: {request_id}");
 
-    //ANCHOR - Set request status
+    persist_request(&mut redis, request_id, &request).await?;
+
+    tracing::info!(
+        "{}",
+        format!("Successfully processed /request: {request_id}")
+    );
+
+    Ok(Json(RequestCreatedPayload { request_id }))
+}
+
+/// Create a new request by ID idempotently — retries succeed, even if the request exits
+/// Note: only enabled in staging
+async fn put_request(
+    Path(request_id): Path<Uuid>,
+    Extension(mut redis): Extension<ConnectionManager>,
+    Json(request): Json<RequestPayload>,
+) -> Result<StatusCode, StatusCode> {
+    tracing::info!("Processing PUT /request: {request_id}");
+
+    // Same logic as post, but always overwrites the existing payload, set status, and reset the TTL
+    persist_request(&mut redis, request_id, &request).await?;
+
+    tracing::info!("Successfully processed /request: {request_id}");
+
+    Ok(StatusCode::CREATED)
+}
+
+/// Persist request payload and initialize status with TTL
+async fn persist_request(
+    redis: &mut ConnectionManager,
+    request_id: Uuid,
+    request: &RequestPayload,
+) -> Result<(), StatusCode> {
+    // Set request status
     redis
         .set_ex::<_, _, ()>(
             format!("{REQ_STATUS_PREFIX}{request_id}"),
@@ -132,7 +168,7 @@ async fn insert_request(
         RequestStatus::Initialized
     );
 
-    //ANCHOR - Store payload
+    // Store payload
     redis
         .set_ex::<_, _, ()>(
             format!("{REQ_PREFIX}{request_id}"),
@@ -142,70 +178,5 @@ async fn insert_request(
         .await
         .map_err(handle_redis_error)?;
 
-    tracing::info!(
-        "{}",
-        format!("Successfully processed /request: {request_id}")
-    );
-
-    Ok(Json(RequestCreatedPayload { request_id }))
-}
-
-async fn put_request(
-    Path(request_id): Path<Uuid>,
-    Extension(mut redis): Extension<ConnectionManager>,
-    Json(request): Json<RequestPayload>,
-) -> Result<StatusCode, StatusCode> {
-    tracing::info!("Processing PUT /request: {request_id}");
-
-    //ANCHOR - Store payload only if it does not already exist (idempotent)
-    let options = SetOptions::default()
-        .conditional_set(ExistenceCheck::NX)
-        .with_expiration(SetExpiry::EX(EXPIRE_AFTER_SECONDS));
-
-    let set_ok: Option<String> = redis
-        .set_options(
-            format!("{REQ_PREFIX}{request_id}"),
-            serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-            options,
-        )
-        .await
-        .map_err(handle_redis_error)?;
-
-    if set_ok.is_none() {
-        // Key already exists: refresh TTLs and treat as success
-        redis
-            .expire::<_, ()>(
-                format!("{REQ_PREFIX}{request_id}"),
-                EXPIRE_AFTER_SECONDS as i64,
-            )
-            .await
-            .map_err(handle_redis_error)?;
-        // Refresh status TTL if present; do not overwrite value/state
-        let _ = redis
-            .expire::<_, ()>(
-                format!("{REQ_STATUS_PREFIX}{request_id}"),
-                EXPIRE_AFTER_SECONDS as i64,
-            )
-            .await;
-        return Ok(StatusCode::OK);
-    }
-
-    //ANCHOR - Set request status (only after successful creation)
-    redis
-        .set_ex::<_, _, ()>(
-            format!("{REQ_STATUS_PREFIX}{request_id}"),
-            RequestStatus::Initialized.to_string(),
-            EXPIRE_AFTER_SECONDS,
-        )
-        .await
-        .map_err(handle_redis_error)?;
-
-    tracing::info!(
-        "Request {request_id} state transition: new -> {0}",
-        RequestStatus::Initialized
-    );
-
-    tracing::info!("Successfully processed /request: {request_id}");
-
-    Ok(StatusCode::CREATED)
+    Ok(())
 }
