@@ -4,8 +4,6 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
-    reviewers:
-      - "m1guelpf"
-      - "andy-t-wang"
     assignees:
-      - "m1guelpf"
+      - "andy-t-wang"
+      - "decentralgabe"
