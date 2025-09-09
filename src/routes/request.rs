@@ -57,7 +57,7 @@ async fn has_request(
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> StatusCode {
     let Ok(exists) = redis
-        .exists::<_, bool>(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .exists::<_, bool>(format!("{REQ_PREFIX}{request_id}"))
         .await
     else {
         return StatusCode::INTERNAL_SERVER_ERROR;
