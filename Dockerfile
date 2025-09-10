@@ -1,10 +1,9 @@
 ####################################################################################################
 ## Base image
 ####################################################################################################
-FROM rust:1.86-slim AS builder
+FROM rust:1.86-slim AS chef
 USER root
 WORKDIR /app
-
 
 RUN apt-get update && apt-get install -y \
     musl-tools \
