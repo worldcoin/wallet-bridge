@@ -31,7 +31,9 @@ jobs:
         run: cargo clippy --all-features
 
       - name: Build
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+        run: |
+          sudo apt-get install musl-tools # required for building ring
+          cargo build --release --locked --target x86_64-unknown-linux-musl
 
   docker:
     name: Test Docker build
