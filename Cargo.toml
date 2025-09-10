@@ -29,6 +29,7 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
     "fmt",
     "json",
 ] }
+rustls = { version = "0.23.31", default-features = false, features = ["ring"] }
 
 [build-dependencies]
 chrono = "0.4.26"

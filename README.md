@@ -47,3 +47,5 @@ An easy way to run is using a Dockerized Redis:
 ```
 docker run -d -p 6379:6379 redis
 ```
+
+When building the Dockerfile locally remember to specify the `--platform=linux/amd64` flag.
