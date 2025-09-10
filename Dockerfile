@@ -8,8 +8,6 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
     musl-tools \
-    ca-certificates \
-    libssl-dev \
     pkg-config \
     build-essential \
     ca-certificates \
