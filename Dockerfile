@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y \
     musl-tools \
     pkg-config \
     build-essential \
- && rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN rustup target add x86_64-unknown-linux-musl
 
@@ -32,7 +33,6 @@ FROM scratch
 
 WORKDIR /app
 
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/world-id-bridge /app/world-id-bridge
 
 USER 100

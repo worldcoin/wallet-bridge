@@ -12,6 +12,9 @@ mod utils;
 async fn main() {
     dotenv().ok();
 
+    // Initialize rustls default crypto provider
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .json()
@@ -45,8 +48,14 @@ async fn main() {
         )
     });
 
+    tracing::info!("Attempting to connect to Redis...");
+
     let redis = build_redis_pool(redis_url)
         .await
+        .map_err(|e| {
+            tracing::error!("Redis connection failed: {}", e);
+            e
+        })
         .expect("Failed to connect to Redis");
 
     tracing::info!("✅ Connection to Redis established.");
@@ -61,5 +70,15 @@ async fn build_redis_pool(mut redis_url: String) -> redis::RedisResult<Connectio
 
     let client = redis::Client::open(redis_url)?;
 
-    ConnectionManager::new(client).await
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        ConnectionManager::new(client),
+    )
+    .await
+    .map_err(|_| {
+        redis::RedisError::from((
+            redis::ErrorKind::IoError,
+            "Redis connection timeout after 30 seconds",
+        ))
+    })?
 }
