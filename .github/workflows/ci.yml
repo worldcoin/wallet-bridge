@@ -14,7 +14,7 @@ permissions:
 jobs:
   lint:
     name: Format & Clippy
-    runs-on: arc-large-amd64-runner
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
@@ -76,13 +76,12 @@ jobs:
           docker logs world-id-bridge-ci-container
 
       - name: Health check Docker container
-        run: curl -f http://0.0.0.0:8000/health
+        run: curl -f http://0.0.0.0:8000/
 
       - name: Clean up
         run: |
           docker stop world-id-bridge-ci-container
           docker rm world-id-bridge-ci-container
-          docker compose down
 
   deny:
     name: Cargo deny
