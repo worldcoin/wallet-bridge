@@ -20,7 +20,7 @@ redis = { version = "0.32.5", features = [
 ] }
 rustls = { version = "0.23.31", default-features = false, features = ["ring"] }
 schemars = { version = "0.8.16", features = ["uuid1"] }
-serde = { version = "1.0.210", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.128"
 tokio = { version = "1.47.1", features = ["full"] }
 tower = "0.5.1"
