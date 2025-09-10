@@ -16,6 +16,7 @@ redis = { version = "0.32.5", features = [
     "tokio-comp",
     "connection-manager",
     "tokio-rustls-comp",
+    "tls-rustls-webpki-roots",
 ] }
 rustls = { version = "0.23.31", default-features = false, features = ["ring"] }
 schemars = { version = "0.8.16", features = ["uuid1"] }
