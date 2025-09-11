@@ -22,6 +22,7 @@ allow = [
     "ISC",
     "LicenseRef-ring",
     "MIT",
+    "Unicode-3.0",
     "Unicode-DFS-2016",
     "Unlicense",
     "Zlib",
@@ -35,5 +36,4 @@ name = "ring"
 [advisories]
 ignore = [
     "RUSTSEC-2025-0056", # adler2 unmaintained (requires upstream updates) (2025-09-09)
-    "RUSTSEC-2024-0421", # idna unmaintained (requires upstream updates) (2025-09-09)
 ]

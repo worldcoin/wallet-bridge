@@ -5,11 +5,11 @@ FROM rust:1.86-slim AS chef
 USER root
 WORKDIR /app
 
+# Install OS dependencies (perl & make required for vendored openssl)
 RUN apt-get update && apt-get install -y \
     musl-tools \
-    pkg-config \
-    build-essential \
-    ca-certificates \
+    perl \
+    make \
     && rm -rf /var/lib/apt/lists/*
 
 RUN rustup target add x86_64-unknown-linux-musl
@@ -29,10 +29,11 @@ RUN cargo build --release --locked --target x86_64-unknown-linux-musl
 ####################################################################################################
 ## Final image
 ####################################################################################################
-FROM scratch
+FROM debian:bookworm-slim
 
 WORKDIR /app
 
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/world-id-bridge /app/world-id-bridge
 
 USER 100
