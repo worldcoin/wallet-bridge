@@ -1,7 +1,7 @@
 ####################################################################################################
 ## Base image
 ####################################################################################################
-FROM --platform=linux/amd64 rust:1.86-slim AS chef
+FROM rust:1.86-slim AS chef
 USER root
 WORKDIR /app
 
@@ -29,7 +29,7 @@ RUN cargo build --release --locked --target x86_64-unknown-linux-musl
 ####################################################################################################
 ## Final image
 ####################################################################################################
-FROM --platform=linux/amd64 debian:bookworm-slim
+FROM debian:bookworm-slim
 
 WORKDIR /app
 
