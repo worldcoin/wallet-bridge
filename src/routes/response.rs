@@ -33,7 +33,10 @@ pub fn handler() -> ApiRouter {
 
     ApiRouter::new().api_route(
         "/response/:request_id",
-        get(get_response).put(insert_response).layer(cors),
+        get(get_response)
+            .head(has_response_status)
+            .put(insert_response)
+            .layer(cors),
     )
 }
 
@@ -88,6 +91,24 @@ async fn get_response(
         status,
         response: None,
     }))
+}
+
+async fn has_response_status(
+    Path(request_id): Path<Uuid>,
+    Extension(mut redis): Extension<ConnectionManager>,
+) -> StatusCode {
+    let Ok(exists) = redis
+        .exists::<_, bool>(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .await
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    };
+
+    if exists {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
 async fn insert_response(
