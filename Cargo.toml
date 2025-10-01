@@ -9,7 +9,7 @@ description = "A bridge between the World ID SDK and the World App"
 
 [dependencies]
 aide = { version = "0.13.2", features = ["axum", "scalar"] }
-axum = "0.7.9"
+axum = "0.8.6"
 axum-jsonschema = { version = "0.8.0", features = ["aide"] }
 dotenvy = "0.15.7"
 openssl = { version = "0.10.73", features = ["vendored"] }
