@@ -17,7 +17,7 @@ redis = { version = "0.32.6", default-features = false, features = ["connection-
 schemars = { version = "0.8.16", features = ["uuid1"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.145"
-tokio = { version = "1.47.1", features = ["full"] }
+tokio = { version = "1.48.0", features = ["full"] }
 tower = "0.5.1"
 tower-http = { version = "0.6.6", features = ["cors"] }
 tracing = { version = "0.1", features = ["log"] }
