@@ -1,6 +1,9 @@
 use std::str::FromStr;
 
-use aide::axum::{routing::get, ApiRouter};
+use aide::axum::{
+    routing::{get, post},
+    ApiRouter,
+};
 use axum::{
     extract::Path,
     http::{Method, StatusCode},
@@ -25,19 +28,27 @@ struct Response {
     response: Option<RequestPayload>,
 }
 
+#[derive(Debug, serde::Serialize, JsonSchema)]
+struct ResponseCreatedPayload {
+    /// The unique identifier for the response
+    request_id: Uuid,
+}
+
 pub fn handler() -> ApiRouter {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_headers(AllowHeaders::any())
-        .allow_methods([Method::GET, Method::PUT]); //TODO: PUT is required by the simulator but should not be included
+        .allow_methods([Method::GET, Method::PUT, Method::POST]); //TODO: PUT is required by the simulator but should not be included
 
-    ApiRouter::new().api_route(
-        "/response/:request_id",
-        get(get_response)
-            .head(has_response_status)
-            .put(insert_response)
-            .layer(cors),
-    )
+    ApiRouter::new()
+        .api_route(
+            "/response/:request_id",
+            get(get_response)
+                .head(has_response_status)
+                .put(insert_response)
+                .layer(cors.clone()),
+        )
+        .api_route("/response", post(create_response).layer(cors))
 }
 
 async fn get_response(
@@ -64,6 +75,17 @@ async fn get_response(
             current_status,
             RequestStatus::Completed
         );
+
+        // Best-effort status cleanup (will expire via TTL anyway)
+        // Don't propagate errors to avoid losing response data if status delete fails
+        if let Err(e) = redis
+            .del::<_, ()>(format!("{REQ_STATUS_PREFIX}{request_id}"))
+            .await
+        {
+            tracing::warn!(
+                "Failed to delete status for {request_id} after response retrieval: {e}"
+            );
+        }
 
         return serde_json::from_slice(&value).map_or(
             Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -159,4 +181,46 @@ async fn insert_response(
         .map_err(handle_redis_error)?;
 
     Ok(StatusCode::CREATED)
+}
+
+/// Create a new standalone response (World App initiates)
+async fn create_response(
+    Extension(mut redis): Extension<ConnectionManager>,
+    Json(request): Json<RequestPayload>,
+) -> Result<(StatusCode, Json<ResponseCreatedPayload>), StatusCode> {
+    let request_id = Uuid::new_v4();
+
+    tracing::info!("Processing POST /response: {request_id}");
+
+    // Initialize status marker (will be deleted when IDKit retrieves response)
+    redis
+        .set_ex::<_, _, ()>(
+            format!("{REQ_STATUS_PREFIX}{request_id}"),
+            RequestStatus::Initialized.to_string(),
+            EXPIRE_AFTER_SECONDS,
+        )
+        .await
+        .map_err(handle_redis_error)?;
+
+    tracing::info!(
+        "Standalone response {request_id} state transition: new -> {}",
+        RequestStatus::Initialized
+    );
+
+    // Store response payload with TTL
+    redis
+        .set_ex::<_, _, ()>(
+            format!("{RES_PREFIX}{request_id}"),
+            serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            EXPIRE_AFTER_SECONDS,
+        )
+        .await
+        .map_err(handle_redis_error)?;
+
+    tracing::info!("Successfully processed POST /response: {request_id}");
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ResponseCreatedPayload { request_id }),
+    ))
 }
