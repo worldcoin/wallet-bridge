@@ -34,6 +34,4 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 name = "ring"
 
 [advisories]
-ignore = [
-    "RUSTSEC-2025-0056", # adler2 unmaintained (requires upstream updates) (2025-09-09)
-]
+ignore = []
