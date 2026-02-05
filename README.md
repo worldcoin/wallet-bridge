@@ -13,9 +13,9 @@ sequenceDiagram
 IDKit ->> Bridge: POST /request
 Bridge ->> IDKit: <id>
 IDKit ->> Bridge: Poll for updates GET /response/:id
-WorldApp ->> Bridge: GET /request/:id
-Bridge ->> WorldApp: <request>
-WorldApp ->> Bridge: PUT /response/:id
+Authenticator ->> Bridge: GET /request/:id
+Bridge ->> Authenticator: <request>
+Authenticator ->> Bridge: PUT /response/:id
 IDKit ->> Bridge: Poll for updates GET /response/:id
 Bridge ->> IDKit: <response>
 ```
@@ -36,9 +36,34 @@ H -- Response provided --> C
 ## Endpoints
 
 - `POST /request`: Called by IDKit. Initializes a proof verification request.
-- `GET /request/:id`: Called by World App. Used to fetch the proof verification request. One time use.
-- `PUT /response/:id`: Called by World App. Used to send the proof back to the application.
+- `GET /request/:id`: Called by Authenticator. Used to fetch the proof verification request. One time use.
+- `PUT /response/:id`: Called by Authenticator. Used to send the proof back to the application.
 - `GET /response/:id`: Called by IDKit. Continuous pulling to fetch the status of the request and the response if available. Response can only be retrieved once.
+- `POST /response`: Called by Authenticator. Creates a standalone response without a prior request.
+
+### Standalone Response Flow (Authenticator Initiates)
+
+Authenticator App initiates without a prior IDKit request:
+
+```mermaid
+sequenceDiagram
+    participant Authenticator
+    participant Bridge
+    participant IDKit
+
+    Authenticator->>Bridge: POST /response (payload)
+    Bridge->>Authenticator: 201 CREATED {request_id}
+    IDKit->>Bridge: GET /response/:request_id
+    Bridge->>IDKit: 200 OK {response}
+```
+
+**World App workflow:**
+1. POST /response with encrypted payload
+2. Receive generated request_id
+3. Send request_id to IDKit
+4. IDKit retrieves response using GET /response/:request_id
+
+**TTL:** 15 minutes (900 seconds) - responses expire automatically
 
 ## Local Development
 
