@@ -1,0 +1,19 @@
+services:
+  # Redis service for integration testing
+  redis-test:
+    image: redis:7-alpine
+    container_name: wallet-bridge-redis-test
+    ports:
+      - 6379:6379
+    networks:
+      - wallet-bridge-test-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+networks:
+  wallet-bridge-test-net:
+    driver: bridge

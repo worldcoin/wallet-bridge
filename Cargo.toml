@@ -26,3 +26,7 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 
 [build-dependencies]
 chrono = "0.4.26"
+
+[dev-dependencies]
+curl = "0.4"
+tokio-test = "0.4"
