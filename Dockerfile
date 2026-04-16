@@ -1,7 +1,7 @@
 ####################################################################################################
 ## Base image
 ####################################################################################################
-FROM rust:1.86-slim AS chef
+FROM rust:1.88-slim AS chef
 USER root
 WORKDIR /app
 
@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
 
 RUN rustup target add x86_64-unknown-linux-musl
 
-RUN cargo install cargo-chef
+RUN cargo install cargo-chef --locked
 
 FROM chef AS planner
 COPY . .
