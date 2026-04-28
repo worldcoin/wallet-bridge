@@ -1,3 +1,7 @@
+use std::env;
+use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use aide::axum::{
     routing::{head, post, put},
     ApiRouter,
@@ -10,21 +14,74 @@ use axum::{
 use axum_jsonschema::Json;
 use redis::{aio::ConnectionManager, AsyncCommands};
 use schemars::JsonSchema;
-use std::env;
-use std::str::FromStr;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::utils::{
-    handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
+    code_ttl_seconds, handle_redis_error, random_token, sha256_hex, validate_base64url,
+    RequestPayload, RequestStatus, CODE_IDX_PREFIX, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
 };
 
 const REQ_PREFIX: &str = "req:";
 
+const INDEX_MIN_BYTES: usize = 8;
+const INDEX_MAX_BYTES: usize = 128;
+
+/// Atomic insert for the secure invite-code variant. Returns 1 on success and 0
+/// if the index is already occupied (live row), giving us the 409-on-collision
+/// guarantee in a single round-trip.
+const INSERT_CODE_LUA: &str = r#"
+if redis.call("EXISTS", KEYS[1]) == 1 then
+    return 0
+end
+redis.call("HSET", KEYS[1],
+    "request_id", ARGV[1],
+    "iv", ARGV[2],
+    "payload", ARGV[3],
+    "session_nonce_hash", ARGV[4],
+    "redeemed", "false")
+redis.call("EXPIRE", KEYS[1], ARGV[5])
+return 1
+"#;
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
+struct CreateRequestBody {
+    /// The initialization vector for the encrypted payload (base64url for the
+    /// invite-code variant, opaque otherwise).
+    iv: String,
+    /// The encrypted payload.
+    payload: String,
+    /// When `true`, the body is the secure invite-code variant and `index` must
+    /// be present. When absent or `false`, the legacy shape is used.
+    #[serde(default)]
+    request_code_enabled: bool,
+    /// HKDF-derived index (base64url) — required when `request_code_enabled` is `true`.
+    #[serde(default)]
+    index: Option<String>,
+}
+
 #[derive(Debug, serde::Serialize, JsonSchema)]
-struct RequestCreatedPayload {
+#[serde(untagged)]
+enum CreateRequestResponse {
+    Legacy(LegacyCreated),
+    Code(CodeCreated),
+}
+
+#[derive(Debug, serde::Serialize, JsonSchema)]
+struct LegacyCreated {
     /// The unique identifier for the request
     request_id: Uuid,
+}
+
+#[derive(Debug, serde::Serialize, JsonSchema)]
+struct CodeCreated {
+    /// The unique identifier for the request
+    request_id: Uuid,
+    /// Opaque token returned to the RP exactly once; required (alongside
+    /// `delivery_token`) to retrieve the eventual response.
+    session_nonce: String,
+    /// Unix timestamp (seconds) at which the unredeemed code expires.
+    code_expires_at: u64,
 }
 
 pub fn handler() -> ApiRouter {
@@ -111,23 +168,99 @@ async fn get_request(
     })
 }
 
-/// Create a new request
+/// Create a new request. Branches on `request_code_enabled` to select the
+/// secure invite-code variant; the legacy shape is byte-identical to before.
 async fn insert_request(
     Extension(mut redis): Extension<ConnectionManager>,
-    Json(request): Json<RequestPayload>,
-) -> Result<Json<RequestCreatedPayload>, StatusCode> {
+    Json(body): Json<CreateRequestBody>,
+) -> Result<Json<CreateRequestResponse>, StatusCode> {
     let request_id = Uuid::new_v4();
+
+    if body.request_code_enabled {
+        return insert_code_request(&mut redis, request_id, body)
+            .await
+            .map(|created| Json(CreateRequestResponse::Code(created)));
+    }
 
     tracing::info!("Processing /request: {request_id}");
 
-    persist_request(&mut redis, request_id, &request).await?;
+    let payload = RequestPayload::new(body.iv, body.payload);
+    persist_request(&mut redis, request_id, &payload).await?;
 
     tracing::info!(
         "{}",
         format!("Successfully processed /request: {request_id}")
     );
 
-    Ok(Json(RequestCreatedPayload { request_id }))
+    Ok(Json(CreateRequestResponse::Legacy(LegacyCreated {
+        request_id,
+    })))
+}
+
+/// Secure invite-code variant. Bridge stores the encrypted blob keyed by the
+/// RP-supplied `index` (HKDF output). The user-typed code `C` and derived key
+/// `K` never reach Bridge — that's the whole point.
+async fn insert_code_request(
+    redis: &mut ConnectionManager,
+    request_id: Uuid,
+    body: CreateRequestBody,
+) -> Result<CodeCreated, StatusCode> {
+    let index = body.index.ok_or(StatusCode::BAD_REQUEST)?;
+
+    validate_base64url(&index, INDEX_MIN_BYTES, INDEX_MAX_BYTES)?;
+    // iv/payload are validated as base64url-decodable; their byte-lengths are
+    // intentionally not pinned here so we don't bake AES-GCM parameters into the
+    // bridge (it's a dumb pipe).
+    validate_base64url(&body.iv, 1, 1024)?;
+    validate_base64url(&body.payload, 1, 5 * 1024 * 1024)?;
+
+    tracing::info!("Processing /request (code variant): {request_id}");
+
+    let session_nonce = random_token();
+    let session_nonce_hash = sha256_hex(&session_nonce);
+    let ttl = code_ttl_seconds();
+
+    let inserted: i32 = redis::Script::new(INSERT_CODE_LUA)
+        .key(format!("{CODE_IDX_PREFIX}{index}"))
+        .arg(request_id.to_string())
+        .arg(&body.iv)
+        .arg(&body.payload)
+        .arg(&session_nonce_hash)
+        .arg(ttl)
+        .invoke_async(redis)
+        .await
+        .map_err(handle_redis_error)?;
+
+    if inserted == 0 {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    redis
+        .set_ex::<_, _, ()>(
+            format!("{REQ_STATUS_PREFIX}{request_id}"),
+            RequestStatus::Initialized.to_string(),
+            EXPIRE_AFTER_SECONDS,
+        )
+        .await
+        .map_err(handle_redis_error)?;
+
+    tracing::info!(
+        "Request {request_id} state transition: new -> {}",
+        RequestStatus::Initialized
+    );
+
+    let code_expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() + ttl)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tracing::info!("Successfully processed /request (code variant): {request_id}");
+
+    Ok(CodeCreated {
+        request_id,
+        session_nonce,
+        code_expires_at,
+    })
 }
 
 /// Create a new request by ID idempotently — retries succeed, even if the request exits
