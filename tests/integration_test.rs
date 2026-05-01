@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use curl::easy::{Easy, List};
 use serde_json::{json, Value};
 use std::env;
@@ -359,17 +359,17 @@ fn test_create_request_validation() {
 // `POST /code/redeem`.
 // ---------------------------------------------------------------------------
 
-/// Fresh 32-byte base64url-encoded value, suitable as an `index` in tests.
+/// Fresh 32-byte base64-encoded value, suitable as an `index` in tests.
 /// Tests use unique indexes per call to avoid Redis-state collisions across
 /// reruns and parallel tests.
 fn fresh_index() -> String {
     let mut bytes = Vec::with_capacity(32);
     bytes.extend_from_slice(Uuid::new_v4().as_bytes());
     bytes.extend_from_slice(Uuid::new_v4().as_bytes());
-    URL_SAFE_NO_PAD.encode(&bytes)
+    STANDARD.encode(&bytes)
 }
 
-/// Random base64url payload of the given byte length — used as fake iv/ct.
+/// Random base64 payload of the given byte length — used as fake iv/ct.
 fn fresh_b64(len: usize) -> String {
     let mut bytes = vec![0u8; len];
     for chunk in bytes.chunks_mut(16) {
@@ -377,7 +377,7 @@ fn fresh_b64(len: usize) -> String {
         let take = chunk.len().min(16);
         chunk[..take].copy_from_slice(&id.as_bytes()[..take]);
     }
-    URL_SAFE_NO_PAD.encode(&bytes)
+    STANDARD.encode(&bytes)
 }
 
 #[test]
@@ -419,10 +419,9 @@ fn test_code_request_happy_path_round_trip() {
     assert_eq!(redeemed["request_id"], request_id);
     assert_eq!(redeemed["iv"], iv);
     assert_eq!(redeemed["payload"], ciphertext);
-    let delivery_token = redeemed["delivery_token"].as_str().expect("delivery_token");
     assert!(
-        !delivery_token.is_empty() && delivery_token.len() >= 32,
-        "delivery_token should be a non-empty token"
+        redeemed.get("delivery_token").is_none(),
+        "delivery_token must not be returned"
     );
 }
 
@@ -485,9 +484,9 @@ fn test_code_redeem_unknown_index_returns_404() {
 #[test]
 fn test_code_redeem_malformed_index_returns_404() {
     let base_url = get_base_url();
-    // Not base64url — same 404 shape as missing/redeemed/expired so we don't
+    // Not base64 — same 404 shape as missing/redeemed/expired so we don't
     // give callers an oracle on the shape of the code space.
-    let redeem = json!({"index": "!!!not-base64url!!!"});
+    let redeem = json!({"index": "!!!not-base64!!!"});
     let (s, _) = http_post(&format!("{}/code/redeem", base_url), &redeem);
     assert_eq!(s, 404);
 }
@@ -497,7 +496,7 @@ fn test_code_request_rejects_invalid_index_with_400() {
     let base_url = get_base_url();
     let body = json!({
         "request_code_enabled": true,
-        "index": "!!!not-base64url!!!",
+        "index": "!!!not-base64!!!",
         "iv": fresh_b64(12),
         "payload": fresh_b64(64),
     });

@@ -18,7 +18,7 @@ use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::utils::{
-    code_ttl_seconds, handle_redis_error, random_token, sha256_hex, validate_base64url,
+    code_ttl_seconds, handle_redis_error, random_token, sha256_hex, validate_base64,
     RequestPayload, RequestStatus, CODE_IDX_PREFIX, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
 };
 
@@ -46,7 +46,7 @@ return 1
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
 struct CreateRequestBody {
-    /// The initialization vector for the encrypted payload (base64url for the
+    /// The initialization vector for the encrypted payload (base64 for the
     /// invite-code variant, opaque otherwise).
     iv: String,
     /// The encrypted payload.
@@ -55,7 +55,7 @@ struct CreateRequestBody {
     /// be present. When absent or `false`, the legacy shape is used.
     #[serde(default)]
     request_code_enabled: bool,
-    /// HKDF-derived index (base64url) — required when `request_code_enabled` is `true`.
+    /// HKDF-derived index (base64) — required when `request_code_enabled` is `true`.
     #[serde(default)]
     index: Option<String>,
 }
@@ -77,8 +77,8 @@ struct LegacyCreated {
 struct CodeCreated {
     /// The unique identifier for the request
     request_id: Uuid,
-    /// Opaque token returned to the RP exactly once; required (alongside
-    /// `delivery_token`) to retrieve the eventual response.
+    /// Opaque token returned to the RP exactly once; required to retrieve the
+    /// eventual response.
     session_nonce: String,
     /// Unix timestamp (seconds) at which the unredeemed code expires.
     code_expires_at: u64,
@@ -207,12 +207,12 @@ async fn insert_code_request(
 ) -> Result<CodeCreated, StatusCode> {
     let index = body.index.ok_or(StatusCode::BAD_REQUEST)?;
 
-    validate_base64url(&index, INDEX_MIN_BYTES, INDEX_MAX_BYTES)?;
-    // iv/payload are validated as base64url-decodable; their byte-lengths are
+    validate_base64(&index, INDEX_MIN_BYTES, INDEX_MAX_BYTES)?;
+    // iv/payload are validated as base64-decodable; their byte-lengths are
     // intentionally not pinned here so we don't bake AES-GCM parameters into the
     // bridge (it's a dumb pipe).
-    validate_base64url(&body.iv, 1, 1024)?;
-    validate_base64url(&body.payload, 1, 5 * 1024 * 1024)?;
+    validate_base64(&body.iv, 1, 1024)?;
+    validate_base64(&body.payload, 1, 5 * 1024 * 1024)?;
 
     tracing::info!("Processing /request (code variant): {request_id}");
 

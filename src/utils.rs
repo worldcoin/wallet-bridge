@@ -1,7 +1,7 @@
 use std::{env, fmt::Display, str::FromStr};
 
 use axum::http::StatusCode;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
 use redis::RedisError;
 use schemars::JsonSchema;
@@ -77,27 +77,26 @@ pub fn handle_redis_error(e: RedisError) -> StatusCode {
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
-/// Generate a fresh 256-bit random token, base64url-encoded without padding.
+/// Generate a fresh 256-bit random token, base64-encoded.
 /// Returned to a caller exactly once; only its SHA-256 hash is persisted.
 pub fn random_token() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
+    STANDARD.encode(bytes)
 }
 
-/// SHA-256 hex digest. Used to store secret tokens (`session_nonce`,
-/// `delivery_token`) at rest so a Redis snapshot leak doesn't compromise live
-/// sessions.
+/// SHA-256 hex digest. Used to store secret tokens (`session_nonce`) at rest
+/// so a Redis snapshot leak doesn't compromise live sessions.
 pub fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-/// Reject inputs that don't look like base64url (no padding) of plausible length.
+/// Reject inputs that don't look like standard base64 of plausible length.
 /// Bounds are byte-counts of the decoded value, inclusive.
-pub fn validate_base64url(s: &str, min_bytes: usize, max_bytes: usize) -> Result<(), StatusCode> {
-    let decoded = URL_SAFE_NO_PAD
+pub fn validate_base64(s: &str, min_bytes: usize, max_bytes: usize) -> Result<(), StatusCode> {
+    let decoded = STANDARD
         .decode(s)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if decoded.len() < min_bytes || decoded.len() > max_bytes {
