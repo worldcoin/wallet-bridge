@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::utils::{
     code_ttl_seconds, handle_redis_error, invite_code_flow_enabled, random_token, sha256_hex,
     validate_base64, RequestPayload, RequestStatus, CODE_IDX_PREFIX, EXPIRE_AFTER_SECONDS,
-    REQ_STATUS_PREFIX,
+    REQ_NONCE_PREFIX, REQ_STATUS_PREFIX,
 };
 
 const REQ_PREFIX: &str = "req:";
@@ -224,6 +224,17 @@ async fn insert_code_request(
         .set_ex::<_, _, ()>(
             format!("{REQ_STATUS_PREFIX}{request_id}"),
             RequestStatus::Initialized.to_string(),
+            EXPIRE_AFTER_SECONDS,
+        )
+        .await
+        .map_err(handle_redis_error)?;
+
+    // Mirror the session_nonce hash to a key addressable by `request_id` so
+    // `GET /response/:request_id` can gate on it without needing the index.
+    redis
+        .set_ex::<_, _, ()>(
+            format!("{REQ_NONCE_PREFIX}{request_id}"),
+            &session_nonce_hash,
             EXPIRE_AFTER_SECONDS,
         )
         .await

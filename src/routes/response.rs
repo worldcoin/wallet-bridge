@@ -6,7 +6,7 @@ use aide::axum::{
 };
 use axum::{
     extract::Path,
-    http::{Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     Extension,
 };
 use axum_jsonschema::Json;
@@ -17,8 +17,11 @@ use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::utils::{
-    handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
+    constant_time_eq, handle_redis_error, sha256_hex, RequestPayload, RequestStatus,
+    EXPIRE_AFTER_SECONDS, REQ_NONCE_PREFIX, REQ_STATUS_PREFIX,
 };
+
+const SESSION_NONCE_HEADER: &str = "x-session-nonce";
 
 const RES_PREFIX: &str = "res:";
 
@@ -51,10 +54,72 @@ pub fn handler() -> ApiRouter {
         .api_route("/response", post(create_response).layer(cors))
 }
 
+/// Code-variant gate: if a `session_nonce` hash is stored for this `request_id`,
+/// require an `X-Session-Nonce` header whose SHA-256 matches it. Legacy
+/// (non-code-variant) requests have no such row and are unaffected.
+///
+/// On success, returns the stored hash (or `None` for legacy requests) so
+/// the caller can decide whether to clean up the gate row after consumption.
+async fn enforce_session_nonce_gate(
+    request_id: &Uuid,
+    headers: &HeaderMap,
+    redis: &mut ConnectionManager,
+) -> Result<Option<String>, StatusCode> {
+    let stored: Option<String> = redis
+        .get(format!("{REQ_NONCE_PREFIX}{request_id}"))
+        .await
+        .map_err(handle_redis_error)?;
+
+    if let Some(stored_hash) = stored.as_deref() {
+        let presented = headers
+            .get(SESSION_NONCE_HEADER)
+            .and_then(|h| h.to_str().ok())
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        let presented_hash = sha256_hex(presented);
+        if !constant_time_eq(presented_hash.as_bytes(), stored_hash.as_bytes()) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    Ok(stored)
+}
+
+/// Best-effort cleanup of bookkeeping rows after a response has been
+/// successfully retrieved. Failures are logged but never propagated; both keys
+/// have a TTL fallback.
+async fn cleanup_after_consumption(
+    request_id: &Uuid,
+    delete_nonce: bool,
+    redis: &mut ConnectionManager,
+) {
+    if let Err(e) = redis
+        .del::<_, ()>(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .await
+    {
+        tracing::warn!("Failed to delete status for {request_id} after response retrieval: {e}");
+    }
+
+    if delete_nonce {
+        if let Err(e) = redis
+            .del::<_, ()>(format!("{REQ_NONCE_PREFIX}{request_id}"))
+            .await
+        {
+            tracing::warn!(
+                "Failed to delete session nonce hash for {request_id} after response retrieval: {e}"
+            );
+        }
+    }
+}
+
 async fn get_response(
     Path(request_id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Json<Response>, StatusCode> {
+    // Returns Some(stored_hash) for code-variant requests (gate fired and passed)
+    // and None for legacy requests (no gate to fire).
+    let stored_nonce_hash = enforce_session_nonce_gate(&request_id, &headers, &mut redis).await?;
+
     // Use a transaction to get both status and response atomically
     let mut pipe = redis::pipe();
     pipe.get(format!("{REQ_STATUS_PREFIX}{request_id}"))
@@ -76,16 +141,7 @@ async fn get_response(
             RequestStatus::Completed
         );
 
-        // Best-effort status cleanup (will expire via TTL anyway)
-        // Don't propagate errors to avoid losing response data if status delete fails
-        if let Err(e) = redis
-            .del::<_, ()>(format!("{REQ_STATUS_PREFIX}{request_id}"))
-            .await
-        {
-            tracing::warn!(
-                "Failed to delete status for {request_id} after response retrieval: {e}"
-            );
-        }
+        cleanup_after_consumption(&request_id, stored_nonce_hash.is_some(), &mut redis).await;
 
         return serde_json::from_slice(&value).map_or(
             Err(StatusCode::INTERNAL_SERVER_ERROR),

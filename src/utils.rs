@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 pub const EXPIRE_AFTER_SECONDS: u64 = 900; // Increasing to allow partner verifications.
 pub const REQ_STATUS_PREFIX: &str = "req:status:";
+pub const REQ_NONCE_PREFIX: &str = "req:nonce:";
 pub const CODE_IDX_PREFIX: &str = "code:idx:";
 
 const DEFAULT_CODE_TTL_SECONDS: u64 = 600;
@@ -105,6 +106,20 @@ pub fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Constant-time byte-slice equality. Used to compare a presented session
+/// nonce's SHA-256 hash against the stored hash without leaking match-prefix
+/// length through timing.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Reject inputs that don't look like standard base64 of plausible length.
