@@ -13,8 +13,21 @@ fn get_base_url() -> String {
 
 /// Helper to perform a GET request and return (status_code, body)
 fn http_get(url: &str) -> (u32, String) {
+    http_get_with_headers(url, &[])
+}
+
+/// Helper to perform a GET request with extra headers (`name: value` pairs).
+fn http_get_with_headers(url: &str, extra_headers: &[(&str, &str)]) -> (u32, String) {
     let mut easy = Easy::new();
     easy.url(url).unwrap();
+
+    if !extra_headers.is_empty() {
+        let mut headers = List::new();
+        for (k, v) in extra_headers {
+            headers.append(&format!("{k}: {v}")).unwrap();
+        }
+        easy.http_headers(headers).unwrap();
+    }
 
     let mut response_body = Vec::new();
     {
@@ -629,6 +642,126 @@ fn test_code_expires_after_ttl() {
         &json!({"index": index}),
     );
     assert_eq!(rs, 404, "expired code must redeem to 404");
+}
+
+// ---------------------------------------------------------------------------
+// Session-nonce gate on GET /response/:request_id (code-variant only).
+// ---------------------------------------------------------------------------
+
+/// Helper: create a code-variant request, returning (request_id, session_nonce).
+fn create_code_request(base_url: &str) -> (String, String) {
+    let body = json!({
+        "request_code_enabled": true,
+        "index": fresh_index(),
+        "iv": fresh_b64(12),
+        "payload": fresh_b64(64),
+    });
+    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 200, "code POST /request should succeed: {b}");
+    let v: Value = serde_json::from_str(&b).unwrap();
+    (
+        v["request_id"].as_str().unwrap().to_string(),
+        v["session_nonce"].as_str().unwrap().to_string(),
+    )
+}
+
+#[test]
+fn test_code_response_gate_rejects_missing_header() {
+    let base_url = get_base_url();
+    let (request_id, _nonce) = create_code_request(&base_url);
+
+    let (s, _) = http_get(&format!("{base_url}/response/{request_id}"));
+    assert_eq!(
+        s, 401,
+        "GET /response without X-Session-Nonce on a code-variant request must 401"
+    );
+}
+
+#[test]
+fn test_code_response_gate_rejects_wrong_nonce() {
+    let base_url = get_base_url();
+    let (request_id, _nonce) = create_code_request(&base_url);
+
+    let (s, _) = http_get_with_headers(
+        &format!("{base_url}/response/{request_id}"),
+        &[("X-Session-Nonce", "this-is-not-the-right-nonce")],
+    );
+    assert_eq!(s, 401, "GET /response with wrong nonce must 401");
+}
+
+#[test]
+fn test_code_response_gate_accepts_correct_nonce_pre_response() {
+    let base_url = get_base_url();
+    let (request_id, nonce) = create_code_request(&base_url);
+
+    // Before any PUT /response, a correctly-authenticated GET should return the
+    // current status with response: None (and NOT 401, NOT 404).
+    let (s, b) = http_get_with_headers(
+        &format!("{base_url}/response/{request_id}"),
+        &[("X-Session-Nonce", &nonce)],
+    );
+    assert_eq!(
+        s, 200,
+        "GET /response with correct nonce should succeed: {b}"
+    );
+    let v: Value = serde_json::from_str(&b).unwrap();
+    assert!(v["response"].is_null(), "response should be null pre-PUT");
+    assert_eq!(v["status"], "initialized");
+}
+
+#[test]
+fn test_code_response_gate_full_round_trip() {
+    let base_url = get_base_url();
+    let (request_id, nonce) = create_code_request(&base_url);
+
+    let resp_iv = fresh_b64(12);
+    let resp_payload = fresh_b64(64);
+    let (ps, _) = http_put(
+        &format!("{base_url}/response/{request_id}"),
+        &json!({"iv": resp_iv, "payload": resp_payload}),
+    );
+    assert_eq!(ps, 201, "PUT /response should succeed");
+
+    let (gs, gb) = http_get_with_headers(
+        &format!("{base_url}/response/{request_id}"),
+        &[("X-Session-Nonce", &nonce)],
+    );
+    assert_eq!(gs, 200, "GET /response with correct nonce should succeed");
+    let v: Value = serde_json::from_str(&gb).unwrap();
+    assert_eq!(v["status"], "completed");
+    assert_eq!(v["response"]["iv"], resp_iv);
+    assert_eq!(v["response"]["payload"], resp_payload);
+
+    // After consumption, the nonce key is also gone — a second GET (with the
+    // same correct nonce) now sees a "legacy-shape" lookup and 404s rather than
+    // 401ing, since the gate only fires when the nonce row exists.
+    let (gs2, _) = http_get_with_headers(
+        &format!("{base_url}/response/{request_id}"),
+        &[("X-Session-Nonce", &nonce)],
+    );
+    assert_eq!(gs2, 404, "second GET should 404 (consumed)");
+}
+
+#[test]
+fn test_legacy_get_response_unaffected_by_gate() {
+    let base_url = get_base_url();
+    // Legacy POST /request has no session_nonce, so its req:nonce row is never
+    // written; GET /response should behave as before (no header required).
+    let body = json!({
+        "iv": fresh_b64(12),
+        "payload": fresh_b64(64),
+    });
+    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 200);
+    let v: Value = serde_json::from_str(&b).unwrap();
+    let request_id = v["request_id"].as_str().unwrap().to_string();
+
+    // No header — legacy flow should still answer.
+    let (gs, _) = http_get(&format!("{base_url}/response/{request_id}"));
+    assert_eq!(
+        gs, 200,
+        "legacy GET /response without header must continue to work"
+    );
 }
 
 /// Test OpenAPI documentation endpoint exists
