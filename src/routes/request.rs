@@ -27,22 +27,8 @@ const REQ_PREFIX: &str = "req:";
 const INDEX_MIN_BYTES: usize = 8;
 const INDEX_MAX_BYTES: usize = 128;
 
-/// Atomic insert for the invite-code variant. Returns 1 on success and 0
-/// if the index is already occupied (live row), giving us the 409-on-collision
-/// guarantee in a single round-trip.
-const INSERT_CODE_LUA: &str = r#"
-if redis.call("EXISTS", KEYS[1]) == 1 then
-    return 0
-end
-redis.call("HSET", KEYS[1],
-    "request_id", ARGV[1],
-    "iv", ARGV[2],
-    "payload", ARGV[3],
-    "session_nonce_hash", ARGV[4],
-    "redeemed", "false")
-redis.call("EXPIRE", KEYS[1], ARGV[5])
-return 1
-"#;
+/// Atomic check-and-insert for the invite-code variant; see `lua/insert_code.lua`.
+const INSERT_CODE_LUA: &str = include_str!("../lua/insert_code.lua");
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
 struct CreateRequestBody {
