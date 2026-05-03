@@ -27,7 +27,7 @@ const REQ_PREFIX: &str = "req:";
 const INDEX_MIN_BYTES: usize = 8;
 const INDEX_MAX_BYTES: usize = 128;
 
-/// Atomic insert for the secure invite-code variant. Returns 1 on success and 0
+/// Atomic insert for the invite-code variant. Returns 1 on success and 0
 /// if the index is already occupied (live row), giving us the 409-on-collision
 /// guarantee in a single round-trip.
 const INSERT_CODE_LUA: &str = r#"
@@ -51,8 +51,8 @@ struct CreateRequestBody {
     iv: String,
     /// The encrypted payload.
     payload: String,
-    /// When `true`, the body is the secure invite-code variant and `index` must
-    /// be present. When absent or `false`, the legacy shape is used.
+    /// When `true`, the body is the invite-code variant and `index` must be
+    /// present. When absent or `false`, the legacy shape is used.
     #[serde(default)]
     request_code_enabled: bool,
     /// HKDF-derived index (base64) — required when `request_code_enabled` is `true`.
@@ -169,7 +169,7 @@ async fn get_request(
 }
 
 /// Create a new request. Branches on `request_code_enabled` to select the
-/// secure invite-code variant; the legacy shape is byte-identical to before.
+/// invite-code variant; the legacy shape is byte-identical to before.
 async fn insert_request(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(body): Json<CreateRequestBody>,
@@ -197,7 +197,7 @@ async fn insert_request(
     })))
 }
 
-/// Secure invite-code variant. Bridge stores the encrypted blob keyed by the
+/// Invite-code variant. Bridge stores the encrypted blob keyed by the
 /// RP-supplied `index` (HKDF output). The user-typed code `C` and derived key
 /// `K` never reach Bridge — that's the whole point.
 async fn insert_code_request(
