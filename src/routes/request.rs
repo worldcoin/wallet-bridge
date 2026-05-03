@@ -27,9 +27,6 @@ const REQ_PREFIX: &str = "req:";
 const INDEX_MIN_BYTES: usize = 8;
 const INDEX_MAX_BYTES: usize = 128;
 
-/// Atomic check-and-insert for the invite-code variant; see `lua/insert_code.lua`.
-const INSERT_CODE_LUA: &str = include_str!("../lua/insert_code.lua");
-
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
 struct CreateRequestBody {
     /// The initialization vector for the encrypted payload (base64 for the
@@ -206,7 +203,7 @@ async fn insert_code_request(
     let session_nonce_hash = sha256_hex(&session_nonce);
     let ttl = code_ttl_seconds();
 
-    let inserted: i32 = redis::Script::new(INSERT_CODE_LUA)
+    let inserted: i32 = redis::Script::new(crate::scripts::INSERT_CODE)
         .key(format!("{CODE_IDX_PREFIX}{index}"))
         .arg(request_id.to_string())
         .arg(&body.iv)

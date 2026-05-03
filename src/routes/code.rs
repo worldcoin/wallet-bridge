@@ -19,9 +19,6 @@ use crate::utils::{
 const INDEX_MIN_BYTES: usize = 8;
 const INDEX_MAX_BYTES: usize = 128;
 
-/// Atomic one-shot redemption; see `lua/redeem.lua`.
-const REDEEM_LUA: &str = include_str!("../lua/redeem.lua");
-
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 struct RedeemRequest {
     /// HKDF-derived index (base64) the World App computed from the
@@ -59,7 +56,7 @@ async fn redeem(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let result: Option<(String, String, String)> = redis::Script::new(REDEEM_LUA)
+    let result: Option<(String, String, String)> = redis::Script::new(crate::scripts::REDEEM)
         .key(format!("{CODE_IDX_PREFIX}{}", body.index))
         .invoke_async(&mut redis)
         .await

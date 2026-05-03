@@ -5,6 +5,7 @@ use redis::aio::ConnectionManager;
 use std::env;
 
 mod routes;
+mod scripts;
 mod server;
 mod utils;
 
