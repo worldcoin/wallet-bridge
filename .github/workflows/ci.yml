@@ -128,6 +128,9 @@ jobs:
       # the full production window. Must be set on BOTH the bridge process
       # and the test runner (the test reads it to know how long to wait).
       CODE_TTL_SECONDS: "2"
+      # The invite-code flow is dark by default in production. CI turns it on
+      # so the integration suite covers the new endpoints.
+      INVITE_CODE_FLOW_ENABLED: "true"
 
     steps:
       - name: Checkout code

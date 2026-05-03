@@ -12,8 +12,8 @@ use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::utils::{
-    handle_redis_error, validate_base64, RequestStatus, CODE_IDX_PREFIX, EXPIRE_AFTER_SECONDS,
-    REQ_STATUS_PREFIX,
+    handle_redis_error, invite_code_flow_enabled, validate_base64, RequestStatus, CODE_IDX_PREFIX,
+    EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
 };
 
 const INDEX_MIN_BYTES: usize = 8;
@@ -36,6 +36,12 @@ struct RedeemResponse {
 }
 
 pub fn handler() -> ApiRouter {
+    // Deploy-time gate: leave the route unregistered when the feature is off
+    // so axum returns its native 404 instead of us inventing a special status.
+    if !invite_code_flow_enabled() {
+        return ApiRouter::new();
+    }
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_headers(AllowHeaders::any())

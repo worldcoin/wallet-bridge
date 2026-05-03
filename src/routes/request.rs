@@ -18,8 +18,9 @@ use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::utils::{
-    code_ttl_seconds, handle_redis_error, random_token, sha256_hex, validate_base64,
-    RequestPayload, RequestStatus, CODE_IDX_PREFIX, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
+    code_ttl_seconds, handle_redis_error, invite_code_flow_enabled, random_token, sha256_hex,
+    validate_base64, RequestPayload, RequestStatus, CODE_IDX_PREFIX, EXPIRE_AFTER_SECONDS,
+    REQ_STATUS_PREFIX,
 };
 
 const REQ_PREFIX: &str = "req:";
@@ -160,6 +161,9 @@ async fn insert_request(
     let request_id = Uuid::new_v4();
 
     if body.request_code_enabled {
+        if !invite_code_flow_enabled() {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
         return insert_code_request(&mut redis, request_id, body)
             .await
             .map(|created| Json(CreateRequestResponse::Code(created)));

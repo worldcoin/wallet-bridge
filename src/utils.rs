@@ -23,6 +23,20 @@ pub fn code_ttl_seconds() -> u64 {
         .unwrap_or(DEFAULT_CODE_TTL_SECONDS)
 }
 
+/// Deploy-time toggle for the invite-code flow. Defaults to `false` so the
+/// new endpoints (`POST /request` with `request_code_enabled: true` and
+/// `POST /code/redeem`) stay dark until the surrounding work is ready in
+/// production. Ops sets `INVITE_CODE_FLOW_ENABLED=true` to turn them on.
+///
+/// Read on every call — env vars are stable for the life of the process, so
+/// there's no caching benefit; this also keeps tests easy by letting them
+/// flip the var without restarting any global state.
+pub fn invite_code_flow_enabled() -> bool {
+    env::var("INVITE_CODE_FLOW_ENABLED")
+        .map(|s| s.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestStatus {
