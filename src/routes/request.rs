@@ -152,7 +152,7 @@ async fn get_request(
 }
 
 /// Create a new request. Branches on `request_code_enabled` to select the
-/// invite-code variant; the legacy shape is byte-identical to before.
+/// correct creation strategy (invite code or raw request).
 async fn insert_request(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(body): Json<CreateRequestBody>,

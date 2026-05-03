@@ -355,8 +355,7 @@ fn test_create_request_validation() {
 }
 
 // ---------------------------------------------------------------------------
-// Invite-code flow (WDP-73 / APP-9425) — `POST /request` (code variant) and
-// `POST /code/redeem`.
+// Invite-code flow — `POST /request` (code variant) and `POST /code/redeem`.
 // ---------------------------------------------------------------------------
 
 /// Fresh 32-byte base64-encoded value, suitable as an `index` in tests.
