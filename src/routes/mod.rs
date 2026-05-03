@@ -1,5 +1,6 @@
 use aide::axum::ApiRouter;
 
+mod code;
 mod request;
 mod response;
 mod system;
@@ -9,4 +10,5 @@ pub fn handler() -> ApiRouter {
         .merge(system::handler())
         .merge(request::handler())
         .merge(response::handler())
+        .merge(code::handler())
 }
