@@ -35,7 +35,7 @@ struct CreateRequestBody {
     /// The encrypted payload.
     payload: String,
     /// When `true`, the body is the invite-code variant and `index` must be
-    /// present. When absent or `false`, the legacy shape is used.
+    /// present. When absent or `false`, the raw shape is used.
     #[serde(default)]
     request_code_enabled: bool,
     /// HKDF-derived index (base64) — required when `request_code_enabled` is `true`.
@@ -46,12 +46,12 @@ struct CreateRequestBody {
 #[derive(Debug, serde::Serialize, JsonSchema)]
 #[serde(untagged)]
 enum CreateRequestResponse {
-    Legacy(LegacyCreated),
+    Raw(RawCreated),
     Code(CodeCreated),
 }
 
 #[derive(Debug, serde::Serialize, JsonSchema)]
-struct LegacyCreated {
+struct RawCreated {
     /// The unique identifier for the request
     request_id: Uuid,
 }
@@ -175,9 +175,7 @@ async fn insert_request(
         format!("Successfully processed /request: {request_id}")
     );
 
-    Ok(Json(CreateRequestResponse::Legacy(LegacyCreated {
-        request_id,
-    })))
+    Ok(Json(CreateRequestResponse::Raw(RawCreated { request_id })))
 }
 
 /// Invite-code variant. Bridge stores the encrypted blob keyed by the
