@@ -96,9 +96,7 @@ pub fn sha256_hex(input: &str) -> String {
 /// Reject inputs that don't look like standard base64 of plausible length.
 /// Bounds are byte-counts of the decoded value, inclusive.
 pub fn validate_base64(s: &str, min_bytes: usize, max_bytes: usize) -> Result<(), StatusCode> {
-    let decoded = STANDARD
-        .decode(s)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let decoded = STANDARD.decode(s).map_err(|_| StatusCode::BAD_REQUEST)?;
     if decoded.len() < min_bytes || decoded.len() > max_bytes {
         return Err(StatusCode::BAD_REQUEST);
     }
