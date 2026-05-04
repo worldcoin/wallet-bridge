@@ -2,6 +2,7 @@ use curl::easy::{Easy, List};
 use serde_json::{json, Value};
 use std::env;
 use std::io::Read;
+use uuid::Uuid;
 
 /// Helper to get the base URL for the wallet bridge service
 fn get_base_url() -> String {
@@ -349,6 +350,94 @@ fn test_create_request_validation() {
     let (status_code, _) = http_post(&url, &invalid_payload);
 
     assert!(status_code >= 400 && status_code < 500);
+}
+
+// ---------------------------------------------------------------------------
+// Client-supplied request_id (POST /request optional `request_id` field).
+// Lets the RP address requests by any opaque ID it chooses (e.g. an HKDF
+// output) so the bridge can be used as a generic content-addressable
+// single-use store without the bridge needing to know the RP's key-derivation
+// scheme.
+// ---------------------------------------------------------------------------
+
+fn fresh_id() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+#[test]
+fn test_create_request_with_client_supplied_id() {
+    let base_url = get_base_url();
+    let id = fresh_id();
+    let body = json!({
+        "request_id": id,
+        "iv": "iv-for-custom-id",
+        "payload": "payload-for-custom-id",
+    });
+    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 200, "POST /request with custom id should succeed: {b}");
+    let v: Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(v["request_id"], id, "response echoes the supplied id");
+
+    let (gs, gb) = http_get(&format!("{base_url}/request/{id}"));
+    assert_eq!(gs, 200, "GET /request/<custom> should retrieve the payload");
+    let gv: Value = serde_json::from_str(&gb).unwrap();
+    assert_eq!(gv["iv"], "iv-for-custom-id");
+    assert_eq!(gv["payload"], "payload-for-custom-id");
+
+    // GETDEL semantics — second GET 404s.
+    let (gs2, _) = http_get(&format!("{base_url}/request/{id}"));
+    assert_eq!(gs2, 404);
+}
+
+#[test]
+fn test_create_request_with_duplicate_id_returns_409() {
+    let base_url = get_base_url();
+    let id = fresh_id();
+    let body = json!({"request_id": id, "iv": "x", "payload": "y"});
+
+    let (s1, _) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s1, 200);
+
+    let (s2, _) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s2, 409, "second POST with same request_id must 409");
+}
+
+#[test]
+fn test_create_request_without_id_still_generates_uuid() {
+    let base_url = get_base_url();
+    let body = json!({"iv": "no-id-iv", "payload": "no-id-payload"});
+
+    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 200);
+    let v: Value = serde_json::from_str(&b).unwrap();
+    let id = v["request_id"].as_str().expect("request_id");
+    // Auto-generated IDs are UUID v4 — 36 chars with hyphens.
+    assert_eq!(id.len(), 36, "auto-generated id should be a UUID v4: {id}");
+    assert_eq!(id.matches('-').count(), 4);
+}
+
+#[test]
+fn test_create_request_rejects_invalid_request_id_chars() {
+    let base_url = get_base_url();
+    let body = json!({
+        "request_id": "has spaces and / slashes",
+        "iv": "x",
+        "payload": "y",
+    });
+    let (s, _) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 400, "invalid request_id chars must 400");
+}
+
+#[test]
+fn test_create_request_rejects_too_long_request_id() {
+    let base_url = get_base_url();
+    let body = json!({
+        "request_id": "a".repeat(257),
+        "iv": "x",
+        "payload": "y",
+    });
+    let (s, _) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 400, "request_id over 256 chars must 400");
 }
 
 /// Test OpenAPI documentation endpoint exists

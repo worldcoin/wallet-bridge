@@ -7,6 +7,12 @@ use schemars::JsonSchema;
 pub const EXPIRE_AFTER_SECONDS: u64 = 900; // Increasing to allow partner verifications.
 pub const REQ_STATUS_PREFIX: &str = "req:status:";
 
+/// Maximum length of a `request_id`, whether supplied by the client on
+/// `POST /request` or extracted from a route path. Bounds Redis-key memory and
+/// keeps URLs reasonable; 256 is more than enough for UUIDs (36), HKDF-derived
+/// hex (64), and base64-shaped identifiers.
+pub const REQUEST_ID_MAX_LEN: usize = 256;
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestStatus {
@@ -49,8 +55,32 @@ pub struct RequestPayload {
     payload: String,
 }
 
+impl RequestPayload {
+    pub const fn new(iv: String, payload: String) -> Self {
+        Self { iv, payload }
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 pub fn handle_redis_error(e: RedisError) -> StatusCode {
     tracing::error!("Redis error: {e}");
     StatusCode::INTERNAL_SERVER_ERROR
+}
+
+/// Validate a `request_id` (path param or client-supplied body field):
+/// non-empty, at most `REQUEST_ID_MAX_LEN` chars, charset limited to
+/// URL-path-safe ASCII (alphanumeric plus `-`, `_`, `.`, `:`). Anything outside
+/// this set is rejected so clients can't smuggle path separators or other
+/// characters that would interact badly with Redis-key formatting or routing.
+pub fn validate_request_id(id: &str) -> Result<(), StatusCode> {
+    if id.is_empty() || id.len() > REQUEST_ID_MAX_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
 }
