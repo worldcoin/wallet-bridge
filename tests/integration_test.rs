@@ -440,6 +440,41 @@ fn test_create_request_rejects_too_long_request_id() {
     assert_eq!(s, 400, "request_id over 256 chars must 400");
 }
 
+#[test]
+fn test_create_request_rejects_too_short_request_id() {
+    let base_url = get_base_url();
+    let body = json!({
+        "request_id": "shortid",
+        "iv": "x",
+        "payload": "y",
+    });
+    let (s, _) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 400, "request_id under 16 chars must 400");
+}
+
+#[test]
+fn test_create_request_rejects_colon_in_request_id() {
+    // Colon is excluded from the charset — `status:foo` would round-trip into
+    // the Redis key `req:status:foo`, colliding with the bridge's own status
+    // namespace. Excluding `:` prevents the overlap by construction.
+    let base_url = get_base_url();
+    let body = json!({
+        "request_id": "status:colliding-id-here",
+        "iv": "x",
+        "payload": "y",
+    });
+    let (s, _) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 400, "request_id containing `:` must 400");
+}
+
+#[test]
+fn test_get_request_malformed_path_returns_400() {
+    let base_url = get_base_url();
+    // 3-char path param fails the min-length check.
+    let (s, _) = http_get(&format!("{base_url}/request/abc"));
+    assert_eq!(s, 400, "GET /request/<too-short> must 400, not 404");
+}
+
 /// Test OpenAPI documentation endpoint exists
 #[test]
 fn test_openapi_endpoint() {

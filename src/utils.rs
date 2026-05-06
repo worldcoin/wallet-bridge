@@ -13,6 +13,14 @@ pub const REQ_STATUS_PREFIX: &str = "req:status:";
 /// hex (64), and base64-shaped identifiers.
 pub const REQUEST_ID_MAX_LEN: usize = 256;
 
+/// Minimum length of a `request_id`. Anything shorter is almost certainly a
+/// mistake — UUIDs are 36 chars, UUID-simple is 32, HKDF-derived hex is 64,
+/// and base64url of 12 random bytes is 16. The bound doesn't enforce
+/// cryptographic entropy on its own (a 16-char string of `aaaa…` passes),
+/// but it stops trivial typos and obvious attacks; the RP is responsible
+/// for picking high-entropy identifiers.
+pub const REQUEST_ID_MIN_LEN: usize = 16;
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestStatus {
@@ -68,17 +76,21 @@ pub fn handle_redis_error(e: RedisError) -> StatusCode {
 }
 
 /// Validate a `request_id` (path param or client-supplied body field):
-/// non-empty, at most `REQUEST_ID_MAX_LEN` chars, charset limited to
-/// URL-path-safe ASCII (alphanumeric plus `-`, `_`, `.`, `:`). Anything outside
-/// this set is rejected so clients can't smuggle path separators or other
-/// characters that would interact badly with Redis-key formatting or routing.
+/// length between `REQUEST_ID_MIN_LEN` and `REQUEST_ID_MAX_LEN`, charset
+/// limited to URL-path-safe ASCII (alphanumeric plus `-`, `_`, `.`).
+///
+/// `:` is intentionally excluded from the charset: an ID like `status:foo`
+/// would round-trip into the Redis key `req:status:foo`, colliding with the
+/// status-namespace key `req:status:foo` that the bridge writes for some
+/// other request. Keeping the charset disjoint from the literal `:` prevents
+/// that overlap by construction.
 pub fn validate_request_id(id: &str) -> Result<(), StatusCode> {
-    if id.is_empty() || id.len() > REQUEST_ID_MAX_LEN {
+    if id.len() < REQUEST_ID_MIN_LEN || id.len() > REQUEST_ID_MAX_LEN {
         return Err(StatusCode::BAD_REQUEST);
     }
     if !id
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     {
         return Err(StatusCode::BAD_REQUEST);
     }

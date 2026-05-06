@@ -34,6 +34,15 @@ struct CreateRequestBody {
     /// any opaque identifier they choose (e.g. an HKDF output) so the bridge
     /// stays a generic content-addressable single-use store rather than baking
     /// in any specific application's flow.
+    ///
+    /// **Entropy is the RP's responsibility.** The bridge enforces length
+    /// bounds and a charset (see `validate_request_id`) but does not check
+    /// cryptographic randomness. A predictable identifier lets a third party
+    /// GETDEL the request before the legitimate consumer does — confidentiality
+    /// still holds because the payload is encrypted, but the single-use
+    /// guarantee is broken. RPs should use a high-entropy source (UUID v4,
+    /// HKDF output, etc.). TODO: enforce a stronger guarantee at the protocol
+    /// layer — e.g. a server-mixed nonce — once we have a clear story for it.
     #[serde(default)]
     request_id: Option<String>,
 }
@@ -75,7 +84,7 @@ async fn has_request(
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> StatusCode {
     if validate_request_id(&request_id).is_err() {
-        return StatusCode::NOT_FOUND;
+        return StatusCode::BAD_REQUEST;
     }
 
     let Ok(exists) = redis
@@ -96,10 +105,8 @@ async fn get_request(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Json<RequestPayload>, StatusCode> {
-    // Malformed IDs return 404 (same shape as missing), so the bridge doesn't
-    // leak information about its key-format expectations to callers.
     if validate_request_id(&request_id).is_err() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     // Use a transaction to get both status and request data atomically
@@ -160,7 +167,6 @@ async fn insert_request(
         serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // SET NX on the payload — collisions return 409 in a single round trip.
-    // The status marker is set afterwards (and is idempotent under retries).
     let options = SetOptions::default()
         .conditional_set(ExistenceCheck::NX)
         .with_expiration(SetExpiry::EX(EXPIRE_AFTER_SECONDS));

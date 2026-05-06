@@ -132,29 +132,8 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Build bridge
-        run: cargo build --bin world-id-bridge
-
       - name: Run integration tests
         run: |
-          target/debug/world-id-bridge > bridge.log 2>&1 &
-          BRIDGE_PID=$!
-          for _ in $(seq 1 30); do
-            if curl -sf http://localhost:8000/ > /dev/null 2>&1; then break; fi
-            sleep 1
-          done
-          if ! curl -sf http://localhost:8000/ > /dev/null 2>&1; then
-            echo "bridge failed to start"
-            cat bridge.log
-            exit 1
-          fi
-          set +e
+          cargo run > bridge.log 2>&1 &
+          until curl -sf http://localhost:8000/ > /dev/null 2>&1; do sleep 1; done
           cargo test --test integration_test
-          TEST_EXIT=$?
-          set -e
-          kill "$BRIDGE_PID" 2>/dev/null || true
-          if [ "$TEST_EXIT" -ne 0 ]; then
-            echo "=== bridge.log ==="
-            cat bridge.log
-          fi
-          exit "$TEST_EXIT"

@@ -57,7 +57,7 @@ async fn get_response(
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Json<Response>, StatusCode> {
     if validate_request_id(&request_id).is_err() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     // Use a transaction to get both status and response atomically
@@ -125,7 +125,7 @@ async fn has_response_status(
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> StatusCode {
     if validate_request_id(&request_id).is_err() {
-        return StatusCode::NOT_FOUND;
+        return StatusCode::BAD_REQUEST;
     }
 
     let Ok(exists) = redis
