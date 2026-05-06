@@ -8,7 +8,7 @@ use axum::{
     Extension,
 };
 use axum_jsonschema::Json;
-use redis::{aio::ConnectionManager, AsyncCommands};
+use redis::{aio::ConnectionManager, AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 use schemars::JsonSchema;
 use std::env;
 use std::str::FromStr;
@@ -16,15 +16,42 @@ use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::utils::{
-    handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
+    handle_redis_error, validate_request_id, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS,
+    REQ_STATUS_PREFIX,
 };
 
 const REQ_PREFIX: &str = "req:";
 
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+struct CreateRequestBody {
+    /// The initialization vector for the encrypted payload (opaque to the bridge).
+    iv: String,
+    /// The encrypted payload (opaque to the bridge).
+    payload: String,
+    /// Optional client-supplied `request_id`. When present, the bridge stores
+    /// the request under this key with NX semantics (409 on collision); when
+    /// absent, the bridge generates a UUID v4. Lets the RP address requests by
+    /// any opaque identifier they choose (e.g. an HKDF output) so the bridge
+    /// stays a generic content-addressable single-use store rather than baking
+    /// in any specific application's flow.
+    ///
+    /// **Entropy is the RP's responsibility.** The bridge enforces length
+    /// bounds and a charset (see `validate_request_id`) but does not check
+    /// cryptographic randomness. A predictable identifier lets a third party
+    /// GETDEL the request before the legitimate consumer does — confidentiality
+    /// still holds because the payload is encrypted, but the single-use
+    /// guarantee is broken. RPs should use a high-entropy source (UUID v4,
+    /// HKDF output, etc.). TODO: enforce a stronger guarantee at the protocol
+    /// layer — e.g. a server-mixed nonce — once we have a clear story for it.
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
 #[derive(Debug, serde::Serialize, JsonSchema)]
 struct RequestCreatedPayload {
-    /// The unique identifier for the request
-    request_id: Uuid,
+    /// The unique identifier for the request — the client-supplied value if
+    /// one was provided, otherwise a server-generated UUID v4.
+    request_id: String,
 }
 
 pub fn handler() -> ApiRouter {
@@ -53,9 +80,13 @@ pub fn handler() -> ApiRouter {
 }
 
 async fn has_request(
-    Path(request_id): Path<Uuid>,
+    Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> StatusCode {
+    if validate_request_id(&request_id).is_err() {
+        return StatusCode::BAD_REQUEST;
+    }
+
     let Ok(exists) = redis
         .exists::<_, bool>(format!("{REQ_PREFIX}{request_id}"))
         .await
@@ -71,9 +102,13 @@ async fn has_request(
 }
 
 async fn get_request(
-    Path(request_id): Path<Uuid>,
+    Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Json<RequestPayload>, StatusCode> {
+    if validate_request_id(&request_id).is_err() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     // Use a transaction to get both status and request data atomically
     let mut pipe = redis::pipe();
     pipe.get(format!("{REQ_STATUS_PREFIX}{request_id}"))
@@ -111,49 +146,40 @@ async fn get_request(
     })
 }
 
-/// Create a new request
+/// Create a new request. Optionally accepts a client-supplied `request_id`
+/// with NX semantics; otherwise generates a UUID v4.
 async fn insert_request(
     Extension(mut redis): Extension<ConnectionManager>,
-    Json(request): Json<RequestPayload>,
+    Json(body): Json<CreateRequestBody>,
 ) -> Result<Json<RequestCreatedPayload>, StatusCode> {
-    let request_id = Uuid::new_v4();
+    let request_id = match body.request_id {
+        Some(id) => {
+            validate_request_id(&id)?;
+            id
+        }
+        None => Uuid::new_v4().to_string(),
+    };
 
     tracing::info!("Processing /request: {request_id}");
 
-    persist_request(&mut redis, request_id, &request).await?;
+    let payload = RequestPayload::new(body.iv, body.payload);
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    tracing::info!(
-        "{}",
-        format!("Successfully processed /request: {request_id}")
-    );
+    // SET NX on the payload — collisions return 409 in a single round trip.
+    let options = SetOptions::default()
+        .conditional_set(ExistenceCheck::NX)
+        .with_expiration(SetExpiry::EX(EXPIRE_AFTER_SECONDS));
 
-    Ok(Json(RequestCreatedPayload { request_id }))
-}
+    let set_ok: Option<String> = redis
+        .set_options(format!("{REQ_PREFIX}{request_id}"), payload_bytes, options)
+        .await
+        .map_err(handle_redis_error)?;
 
-/// Create a new request by ID idempotently — retries succeed, even if the request exits
-/// Note: only enabled in staging
-async fn put_request(
-    Path(request_id): Path<Uuid>,
-    Extension(mut redis): Extension<ConnectionManager>,
-    Json(request): Json<RequestPayload>,
-) -> Result<StatusCode, StatusCode> {
-    tracing::info!("Processing PUT /request: {request_id}");
+    if set_ok.is_none() {
+        return Err(StatusCode::CONFLICT);
+    }
 
-    // Same logic as post, but always overwrites the existing payload, set status, and reset the TTL
-    persist_request(&mut redis, request_id, &request).await?;
-
-    tracing::info!("Successfully PUT /request: {request_id}");
-
-    Ok(StatusCode::CREATED)
-}
-
-/// Persist request payload and initialize status with TTL
-async fn persist_request(
-    redis: &mut ConnectionManager,
-    request_id: Uuid,
-    request: &RequestPayload,
-) -> Result<(), StatusCode> {
-    //ANCHOR - Set request status
     redis
         .set_ex::<_, _, ()>(
             format!("{REQ_STATUS_PREFIX}{request_id}"),
@@ -168,7 +194,37 @@ async fn persist_request(
         RequestStatus::Initialized
     );
 
-    //ANCHOR - Store payload
+    tracing::info!("Successfully processed /request: {request_id}");
+
+    Ok(Json(RequestCreatedPayload { request_id }))
+}
+
+/// Create a new request by ID idempotently — retries succeed, even if the request exists.
+/// Note: only enabled in staging.
+async fn put_request(
+    Path(request_id): Path<String>,
+    Extension(mut redis): Extension<ConnectionManager>,
+    Json(request): Json<RequestPayload>,
+) -> Result<StatusCode, StatusCode> {
+    validate_request_id(&request_id)?;
+
+    tracing::info!("Processing PUT /request: {request_id}");
+
+    // Same logic as POST, but always overwrites the existing payload, sets status, and resets the TTL.
+    redis
+        .set_ex::<_, _, ()>(
+            format!("{REQ_STATUS_PREFIX}{request_id}"),
+            RequestStatus::Initialized.to_string(),
+            EXPIRE_AFTER_SECONDS,
+        )
+        .await
+        .map_err(handle_redis_error)?;
+
+    tracing::info!(
+        "Request {request_id} state transition: new -> {}",
+        RequestStatus::Initialized
+    );
+
     redis
         .set_ex::<_, _, ()>(
             format!("{REQ_PREFIX}{request_id}"),
@@ -178,5 +234,7 @@ async fn persist_request(
         .await
         .map_err(handle_redis_error)?;
 
-    Ok(())
+    tracing::info!("Successfully PUT /request: {request_id}");
+
+    Ok(StatusCode::CREATED)
 }

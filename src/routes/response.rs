@@ -17,7 +17,8 @@ use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::utils::{
-    handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
+    handle_redis_error, validate_request_id, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS,
+    REQ_STATUS_PREFIX,
 };
 
 const RES_PREFIX: &str = "res:";
@@ -31,7 +32,7 @@ struct Response {
 #[derive(Debug, serde::Serialize, JsonSchema)]
 struct ResponseCreatedPayload {
     /// The unique identifier for the response
-    request_id: Uuid,
+    request_id: String,
 }
 
 pub fn handler() -> ApiRouter {
@@ -52,9 +53,13 @@ pub fn handler() -> ApiRouter {
 }
 
 async fn get_response(
-    Path(request_id): Path<Uuid>,
+    Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Json<Response>, StatusCode> {
+    if validate_request_id(&request_id).is_err() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     // Use a transaction to get both status and response atomically
     let mut pipe = redis::pipe();
     pipe.get(format!("{REQ_STATUS_PREFIX}{request_id}"))
@@ -116,9 +121,13 @@ async fn get_response(
 }
 
 async fn has_response_status(
-    Path(request_id): Path<Uuid>,
+    Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> StatusCode {
+    if validate_request_id(&request_id).is_err() {
+        return StatusCode::BAD_REQUEST;
+    }
+
     let Ok(exists) = redis
         .exists::<_, bool>(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
@@ -134,10 +143,12 @@ async fn has_response_status(
 }
 
 async fn insert_response(
-    Path(request_id): Path<Uuid>,
+    Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
+    validate_request_id(&request_id)?;
+
     //ANCHOR - Check the request is valid
     let current_status = redis
         .get::<_, Option<String>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
@@ -188,7 +199,7 @@ async fn create_response(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<RequestPayload>,
 ) -> Result<(StatusCode, Json<ResponseCreatedPayload>), StatusCode> {
-    let request_id = Uuid::new_v4();
+    let request_id = Uuid::new_v4().to_string();
 
     tracing::info!("Processing POST /response: {request_id}");
 
