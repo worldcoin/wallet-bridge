@@ -83,6 +83,7 @@ async fn has_request(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> StatusCode {
+    let request_id = request_id.to_lowercase();
     if validate_request_id(&request_id).is_err() {
         return StatusCode::BAD_REQUEST;
     }
@@ -105,6 +106,7 @@ async fn get_request(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Json<RequestPayload>, StatusCode> {
+    let request_id = request_id.to_lowercase();
     if validate_request_id(&request_id).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -154,6 +156,7 @@ async fn insert_request(
 ) -> Result<Json<RequestCreatedPayload>, StatusCode> {
     let request_id = match body.request_id {
         Some(id) => {
+            let id = id.to_lowercase();
             validate_request_id(&id)?;
             id
         }
@@ -206,6 +209,7 @@ async fn put_request(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
+    let request_id = request_id.to_lowercase();
     validate_request_id(&request_id)?;
 
     tracing::info!("Processing PUT /request: {request_id}");
