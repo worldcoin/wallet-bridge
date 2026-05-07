@@ -56,6 +56,7 @@ async fn get_response(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Json<Response>, StatusCode> {
+    let request_id = request_id.to_lowercase();
     if validate_request_id(&request_id).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -124,6 +125,7 @@ async fn has_response_status(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> StatusCode {
+    let request_id = request_id.to_lowercase();
     if validate_request_id(&request_id).is_err() {
         return StatusCode::BAD_REQUEST;
     }
@@ -147,6 +149,7 @@ async fn insert_response(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
+    let request_id = request_id.to_lowercase();
     validate_request_id(&request_id)?;
 
     //ANCHOR - Check the request is valid

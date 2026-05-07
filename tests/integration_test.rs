@@ -475,6 +475,93 @@ fn test_get_request_malformed_path_returns_400() {
     assert_eq!(s, 400, "GET /request/<too-short> must 400, not 404");
 }
 
+// ---------------------------------------------------------------------------
+// request_id case-insensitivity: all IDs are normalized to lowercase so
+// callers using mixed-case or uppercase IDs always hit the same Redis key.
+// ---------------------------------------------------------------------------
+
+/// Supplying an uppercase `request_id` on POST /request — the response echoes
+/// it back as lowercase and the key is stored lowercase.
+#[test]
+fn test_create_request_uppercase_id_is_normalized() {
+    let base_url = get_base_url();
+    let id_lower = fresh_id();
+    let id_upper = id_lower.to_uppercase();
+
+    let body = json!({"request_id": id_upper, "iv": "iv-upper", "payload": "payload-upper"});
+    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 200, "POST with uppercase request_id should succeed: {b}");
+
+    let v: Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(
+        v["request_id"], id_lower,
+        "response must echo the normalized (lowercase) id"
+    );
+
+    // Retrieve using the lowercase id — must find the stored payload.
+    let (gs, gb) = http_get(&format!("{base_url}/request/{id_lower}"));
+    assert_eq!(gs, 200, "GET with lowercase id must find the payload");
+    let gv: Value = serde_json::from_str(&gb).unwrap();
+    assert_eq!(gv["iv"], "iv-upper");
+}
+
+/// GET /request/:id with an uppercase path param finds the key stored by its
+/// lowercase equivalent (normalization happens at the path layer too).
+#[test]
+fn test_get_request_uppercase_path_param_is_normalized() {
+    let base_url = get_base_url();
+    let id_lower = fresh_id();
+
+    // Store using lowercase id.
+    let body = json!({"request_id": id_lower, "iv": "iv-path", "payload": "payload-path"});
+    let (s, _) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 200);
+
+    // Retrieve using uppercase path param — must hit the same key.
+    let id_upper = id_lower.to_uppercase();
+    let (gs, gb) = http_get(&format!("{base_url}/request/{id_upper}"));
+    assert_eq!(
+        gs, 200,
+        "GET with uppercase path param must find the payload"
+    );
+    let gv: Value = serde_json::from_str(&gb).unwrap();
+    assert_eq!(gv["iv"], "iv-path");
+    assert_eq!(gv["payload"], "payload-path");
+}
+
+/// Full round-trip: POST with uppercase id, PUT response via uppercase path,
+/// GET response via lowercase path — all resolve to the same key.
+#[test]
+fn test_case_insensitive_full_round_trip() {
+    let base_url = get_base_url();
+    let id_lower = fresh_id();
+    let id_upper = id_lower.to_uppercase();
+
+    // Create request with uppercase id.
+    let req_body = json!({"request_id": id_upper, "iv": "rt-iv", "payload": "rt-payload"});
+    let (s, _) = http_post(&format!("{base_url}/request"), &req_body);
+    assert_eq!(s, 200);
+
+    // Consume the request (GET) with mixed path — verifies normalization at GET.
+    let (gs, _) = http_get(&format!("{base_url}/request/{id_upper}"));
+    assert_eq!(gs, 200);
+
+    // PUT response using uppercase path param.
+    let res_body = json!({"iv": "rt-resp-iv", "payload": "rt-resp-payload"});
+    let (ps, _) = http_put(&format!("{base_url}/response/{id_upper}"), &res_body);
+    assert_eq!(ps, 201, "PUT /response with uppercase id must succeed");
+
+    // GET response using lowercase path param.
+    let (rgs, rgb) = http_get(&format!("{base_url}/response/{id_lower}"));
+    assert_eq!(
+        rgs, 200,
+        "GET /response with lowercase id must find the response"
+    );
+    let rv: Value = serde_json::from_str(&rgb).unwrap();
+    assert_eq!(rv["status"], "completed");
+    assert_eq!(rv["response"]["iv"], "rt-resp-iv");
+}
+
 /// Test OpenAPI documentation endpoint exists
 #[test]
 fn test_openapi_endpoint() {
