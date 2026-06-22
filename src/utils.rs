@@ -30,6 +30,10 @@ pub const REQUEST_ID_MIN_LEN: usize = 16;
 /// - `verify_url` is a *base* URL; the SDK appends its own per-request query
 ///   params (`t/i/k/b`).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+// Reject unknown keys so a misspelled override field (e.g. the old
+// `app_clip_url`) fails to parse and trips the startup fail-fast, rather than
+// silently producing an empty override that looks healthy but does nothing.
+#[serde(deny_unknown_fields)]
 pub struct AppOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_clip_bundle_id: Option<String>,
@@ -152,6 +156,16 @@ mod tests {
             verify_url: None,
         };
         assert_eq!(serde_json::to_string(&empty).unwrap(), "{}");
+    }
+
+    #[test]
+    fn app_overrides_rejects_unknown_fields() {
+        // A misspelled/unknown override key (e.g. the old name `app_clip_url`)
+        // must fail to parse rather than silently producing an empty override
+        // entry — so a bad rollout config fails fast at startup instead of
+        // looking healthy while doing nothing.
+        let raw = r#"{"app_one": {"app_clip_url": "org.one.Clip"}}"#;
+        assert!(serde_json::from_str::<AppOverrides>(raw).is_err());
     }
 
     #[test]

@@ -61,7 +61,7 @@ async fn main() {
 
 /// Load the per-`app_id` URL override map from the `APP_URL_OVERRIDES` env var.
 ///
-/// The value is a JSON object of `app_id → {app_clip_url?, verify_url?}`.
+/// The value is a JSON object of `app_id → {app_clip_bundle_id?, verify_url?}`.
 /// Unset or empty ⇒ the feature is off (empty map; the SDK keeps its built-in
 /// defaults). This is the kill switch: clear the env var and restart.
 ///
