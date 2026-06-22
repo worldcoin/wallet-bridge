@@ -1,8 +1,9 @@
-use std::{fmt::Display, str::FromStr};
+use std::{collections::HashMap, fmt::Display, str::FromStr};
 
 use axum::http::StatusCode;
 use redis::RedisError;
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 pub const EXPIRE_AFTER_SECONDS: u64 = 900; // Increasing to allow partner verifications.
 pub const REQ_STATUS_PREFIX: &str = "req:status:";
@@ -21,7 +22,29 @@ pub const REQUEST_ID_MAX_LEN: usize = 256;
 /// for picking high-entropy identifiers.
 pub const REQUEST_ID_MIN_LEN: usize = 16;
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, JsonSchema)]
+/// A per-`app_id` override, this is a temporary workaround that enables smooth rollout of our new World ID app.
+///
+/// - `app_clip_bundle_id` is the App Clip's bundle identifier (the `p`
+///   parameter of an `appclip.apple.com/id` default link, e.g.
+///   `org.worldcoin.insight.Clip`).
+/// - `verify_url` is a *base* URL; the SDK appends its own per-request query
+///   params (`t/i/k/b`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+// Reject unknown keys so a misspelled override field (e.g. the old
+// `app_clip_url`) fails to parse and trips the startup fail-fast, rather than
+// silently producing an empty override that looks healthy but does nothing.
+#[serde(deny_unknown_fields)]
+pub struct AppOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_clip_bundle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_url: Option<String>,
+}
+
+/// A map with app overrides, loaded from environment during startup
+pub type AppOverrides = HashMap<String, AppOverride>;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestStatus {
     /// The request has been initiated by the client
@@ -55,7 +78,7 @@ impl FromStr for RequestStatus {
     }
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct RequestPayload {
     /// The initialization vector for the encrypted payload
     iv: String,
@@ -95,4 +118,59 @@ pub fn validate_request_id(id: &str) -> Result<(), StatusCode> {
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_overrides_parse_from_json() {
+        let raw = r#"{
+            "app_one": {"app_clip_bundle_id": "org.one.Clip", "verify_url": "https://world.org/verify"},
+            "app_two": {"app_clip_bundle_id": "org.two.Clip"},
+            "app_three": {"verify_url": "https://world.org/verify"}
+        }"#;
+        let map: AppOverrides = serde_json::from_str(raw).expect("valid override JSON");
+
+        assert_eq!(map.len(), 3);
+        assert_eq!(
+            map["app_one"].verify_url.as_deref(),
+            Some("https://world.org/verify")
+        );
+        assert_eq!(
+            map["app_one"].app_clip_bundle_id.as_deref(),
+            Some("org.one.Clip")
+        );
+        // Independently optional fields.
+        assert!(map["app_two"].verify_url.is_none());
+        assert!(map["app_three"].app_clip_bundle_id.is_none());
+    }
+
+    #[test]
+    fn app_override_omits_absent_fields_when_serialized() {
+        // `skip_serializing_if` keeps the POST /request response lean and lets
+        // the SDK treat "absent" as "fall back to default".
+        let empty = AppOverride {
+            app_clip_bundle_id: None,
+            verify_url: None,
+        };
+        assert_eq!(serde_json::to_string(&empty).unwrap(), "{}");
+    }
+
+    #[test]
+    fn app_overrides_rejects_unknown_fields() {
+        // A misspelled/unknown override key (e.g. the old name `app_clip_url`)
+        // must fail to parse rather than silently producing an empty override
+        // entry — so a bad rollout config fails fast at startup instead of
+        // looking healthy while doing nothing.
+        let raw = r#"{"app_one": {"app_clip_url": "org.one.Clip"}}"#;
+        assert!(serde_json::from_str::<AppOverrides>(raw).is_err());
+    }
+
+    #[test]
+    fn empty_json_object_is_valid_and_disables_feature() {
+        let map: AppOverrides = serde_json::from_str("{}").expect("empty object is valid");
+        assert!(map.is_empty());
+    }
 }

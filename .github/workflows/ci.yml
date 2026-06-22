@@ -123,6 +123,9 @@ jobs:
 
     env:
       REDIS_URL: redis://localhost:6379
+      # Fixture consumed by the app-override integration tests. Must match the
+      # FIXTURE_* constants in tests/integration_test.rs.
+      APP_URL_OVERRIDES: '{"app_integration_override_fixture":{"app_clip_bundle_id":"org.example.integration.Clip","verify_url":"https://world.org/verify"}}'
 
     steps:
       - name: Checkout code

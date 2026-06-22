@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, sync::Arc};
 
 use aide::openapi::{Info, License, OpenApi};
 use axum::{extract::DefaultBodyLimit, Extension};
@@ -6,8 +6,9 @@ use redis::aio::ConnectionManager;
 use tokio::{net::TcpListener, signal};
 
 use crate::routes;
+use crate::utils::AppOverrides;
 
-pub async fn start(redis: ConnectionManager) {
+pub async fn start(redis: ConnectionManager, app_overrides: Arc<AppOverrides>) {
     let mut openapi = OpenApi {
         info: Info {
             title: "Wallet Bridge".to_string(),
@@ -27,6 +28,7 @@ pub async fn start(redis: ConnectionManager) {
     let app = routes::handler()
         .finish_api(&mut openapi)
         .layer(Extension(redis))
+        .layer(Extension(app_overrides))
         .layer(Extension(openapi))
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024));
 

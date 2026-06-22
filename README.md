@@ -87,8 +87,12 @@ A `docker-compose.test.yml` file provides Redis for integration testing, and com
 # Terminal 1: Start Redis
 docker-compose -f docker-compose.test.yml up -d
 
-# Terminal 2: Start the application
-REDIS_URL=redis://localhost:6379 cargo run
+# Terminal 2: Start the application.
+# APP_URL_OVERRIDES is the fixture the app-override tests assert against; it
+# must match the FIXTURE_* constants in tests/integration_test.rs.
+REDIS_URL=redis://localhost:6379 \
+APP_URL_OVERRIDES='{"app_integration_override_fixture":{"app_clip_bundle_id":"org.example.integration.Clip","verify_url":"https://world.org/verify"}}' \
+cargo run
 
 # Terminal 3: Run the tests
 cargo test --test integration_test
@@ -104,6 +108,7 @@ The integration tests cover:
 - Standalone response flow (World App initiated)
 - Pending status handling
 - Error cases (404s, validation)
+- Per-app URL overrides (mapped/unmapped/absent/malformed `app_id`)
 - OpenAPI documentation endpoint
 
 ### Manual Integration Testing
@@ -159,3 +164,4 @@ Other useful environment variables:
 - `PORT`: Application port (default: 8000)
 - `ENVIRONMENT`: Environment name (development/production)
 - `RUST_LOG`: Logging level (info/debug/trace)
+- `APP_URL_OVERRIDES`: JSON object mapping `app_id → {app_clip_bundle_id?, verify_url?}`. The bridge returns this whole map verbatim in every `POST /request` response (as `app_overrides`) — it takes no `app_id` input and does not inspect which app a request belongs to. The iOS SDK selects its own `app_id` entry client-side to override its built-in App Clip bundle id (the `p` of an `appclip.apple.com/id` default link) and verify base URL. Unset or empty disables the feature (the field is omitted; the SDK keeps its defaults) — this is the kill switch. Malformed JSON is a fatal startup error.
