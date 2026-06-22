@@ -3,10 +3,13 @@
 use dotenvy::dotenv;
 use redis::aio::ConnectionManager;
 use std::env;
+use std::sync::Arc;
 
 mod routes;
 mod server;
 mod utils;
+
+use utils::AppOverrides;
 
 #[tokio::main]
 async fn main() {
@@ -51,7 +54,35 @@ async fn main() {
 
     tracing::info!("✅ Connection to Redis established.");
 
-    server::start(redis).await;
+    let app_overrides = Arc::new(load_app_overrides());
+
+    server::start(redis, app_overrides).await;
+}
+
+/// Load the per-`app_id` URL override map from the `APP_URL_OVERRIDES` env var.
+///
+/// The value is a JSON object of `app_id → {app_clip_url?, verify_url?}`.
+/// Unset or empty ⇒ the feature is off (empty map; the SDK keeps its built-in
+/// defaults). This is the kill switch: clear the env var and restart.
+///
+/// Malformed JSON is a fatal startup error (panic) rather than a silently
+/// empty map — a broken config must fail loudly at deploy time, not degrade
+/// into "no overrides" that looks healthy. Parsed exactly once here; the
+/// resulting map is shared read-only across all requests.
+fn load_app_overrides() -> AppOverrides {
+    let raw = match env::var("APP_URL_OVERRIDES") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => {
+            tracing::info!("APP_URL_OVERRIDES not set — app URL overrides disabled.");
+            return AppOverrides::default();
+        }
+    };
+
+    let overrides: AppOverrides = serde_json::from_str(&raw)
+        .expect("APP_URL_OVERRIDES is set but is not valid JSON for app_id → override map");
+
+    tracing::info!("Loaded {} app URL override(s).", overrides.len());
+    overrides
 }
 
 async fn build_redis_pool(redis_url: String) -> redis::RedisResult<ConnectionManager> {

@@ -402,6 +402,66 @@ fn test_create_request_with_duplicate_id_returns_409() {
     assert_eq!(s2, 409, "second POST with same request_id must 409");
 }
 
+// ---------------------------------------------------------------------------
+// Server-driven URL overrides. The bridge takes no `app_id` input — it returns
+// the whole `app_overrides` map blindly and the SDK picks its own entry.
+//
+// These tests require the bridge to be started with this exact fixture in the
+// `APP_URL_OVERRIDES` env var (CI and the README do this):
+//
+//   {"app_integration_override_fixture":
+//      {"app_clip_bundle_id":"org.example.integration.Clip",
+//       "verify_url":"https://world.org/verify"}}
+// ---------------------------------------------------------------------------
+
+const FIXTURE_APP_ID: &str = "app_integration_override_fixture";
+const FIXTURE_APP_CLIP_BUNDLE_ID: &str = "org.example.integration.Clip";
+const FIXTURE_VERIFY_URL: &str = "https://world.org/verify";
+
+#[test]
+fn test_response_includes_full_override_map() {
+    let base_url = get_base_url();
+    let body = json!({"iv": "x", "payload": "y"});
+
+    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 200, "POST /request should succeed: {b}");
+
+    let v: Value = serde_json::from_str(&b).unwrap();
+    let entry = v
+        .get("app_overrides")
+        .and_then(|m| m.get(FIXTURE_APP_ID))
+        .unwrap_or_else(|| panic!("app_overrides map must contain the fixture entry. Is APP_URL_OVERRIDES set to the test fixture? Got: {b}"));
+
+    assert_eq!(
+        entry.get("app_clip_bundle_id").and_then(Value::as_str),
+        Some(FIXTURE_APP_CLIP_BUNDLE_ID),
+        "fixture entry must carry the configured app_clip_bundle_id: {b}"
+    );
+    assert_eq!(
+        entry.get("verify_url").and_then(Value::as_str),
+        Some(FIXTURE_VERIFY_URL),
+        "fixture entry must carry the configured verify_url: {b}"
+    );
+}
+
+#[test]
+fn test_request_id_still_present_alongside_overrides() {
+    // The override map is additive — the core request_id contract is unchanged,
+    // so an SDK that ignores app_overrides still works exactly as before.
+    let base_url = get_base_url();
+    let body = json!({"iv": "x", "payload": "y"});
+
+    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 200, "POST /request should succeed: {b}");
+
+    let v: Value = serde_json::from_str(&b).unwrap();
+    let request_id = v.get("request_id").and_then(Value::as_str);
+    assert!(
+        request_id.is_some() && !request_id.unwrap().is_empty(),
+        "request_id must still be present and non-empty: {b}"
+    );
+}
+
 #[test]
 fn test_create_request_without_id_still_generates_uuid() {
     let base_url = get_base_url();

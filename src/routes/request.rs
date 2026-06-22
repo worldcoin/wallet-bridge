@@ -12,12 +12,13 @@ use redis::{aio::ConnectionManager, AsyncCommands, ExistenceCheck, SetExpiry, Se
 use schemars::JsonSchema;
 use std::env;
 use std::str::FromStr;
+use std::sync::Arc;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::utils::{
-    handle_redis_error, validate_request_id, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS,
-    REQ_STATUS_PREFIX,
+    handle_redis_error, validate_request_id, AppOverrides, RequestPayload, RequestStatus,
+    EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
 };
 
 const REQ_PREFIX: &str = "req:";
@@ -52,6 +53,10 @@ struct RequestCreatedPayload {
     /// The unique identifier for the request — the client-supplied value if
     /// one was provided, otherwise a server-generated UUID v4.
     request_id: String,
+    /// Temporary workaround for the World ID app rollout.
+    /// to configure deeplink values from the server and set app-specific overrides
+    #[serde(skip_serializing_if = "AppOverrides::is_empty")]
+    app_overrides: AppOverrides,
 }
 
 pub fn handler() -> ApiRouter {
@@ -152,6 +157,7 @@ async fn get_request(
 /// with NX semantics; otherwise generates a UUID v4.
 async fn insert_request(
     Extension(mut redis): Extension<ConnectionManager>,
+    Extension(app_overrides): Extension<Arc<AppOverrides>>,
     Json(body): Json<CreateRequestBody>,
 ) -> Result<Json<RequestCreatedPayload>, StatusCode> {
     let request_id = match body.request_id {
@@ -199,7 +205,10 @@ async fn insert_request(
 
     tracing::info!("Successfully processed /request: {request_id}");
 
-    Ok(Json(RequestCreatedPayload { request_id }))
+    Ok(Json(RequestCreatedPayload {
+        request_id,
+        app_overrides: (*app_overrides).clone(),
+    }))
 }
 
 /// Create a new request by ID idempotently — retries succeed, even if the request exists.
