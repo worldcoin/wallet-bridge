@@ -421,7 +421,8 @@ const FIXTURE_VERIFY_URL: &str = "https://world.org/verify";
 #[test]
 fn test_response_includes_full_override_map() {
     let base_url = get_base_url();
-    let body = json!({"iv": "x", "payload": "y"});
+    // Opt in — the bridge only returns overrides to clients that advertise support.
+    let body = json!({"iv": "x", "payload": "y", "supports_app_overrides": true});
 
     let (s, b) = http_post(&format!("{base_url}/request"), &body);
     assert_eq!(s, 200, "POST /request should succeed: {b}");
@@ -449,7 +450,7 @@ fn test_request_id_still_present_alongside_overrides() {
     // The override map is additive — the core request_id contract is unchanged,
     // so an SDK that ignores app_overrides still works exactly as before.
     let base_url = get_base_url();
-    let body = json!({"iv": "x", "payload": "y"});
+    let body = json!({"iv": "x", "payload": "y", "supports_app_overrides": true});
 
     let (s, b) = http_post(&format!("{base_url}/request"), &body);
     assert_eq!(s, 200, "POST /request should succeed: {b}");
@@ -459,6 +460,25 @@ fn test_request_id_still_present_alongside_overrides() {
     assert!(
         request_id.is_some() && !request_id.unwrap().is_empty(),
         "request_id must still be present and non-empty: {b}"
+    );
+}
+
+#[test]
+fn test_response_omits_overrides_without_opt_in() {
+    let base_url = get_base_url();
+    let body = json!({"iv": "x", "payload": "y"});
+
+    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    assert_eq!(s, 200, "POST /request should succeed: {b}");
+
+    let v: Value = serde_json::from_str(&b).unwrap();
+    assert!(
+        v.get("request_id").and_then(Value::as_str).is_some(),
+        "request_id must be present: {b}"
+    );
+    assert!(
+        v.get("app_overrides").is_none(),
+        "app_overrides must be absent when the client did not opt in: {b}"
     );
 }
 

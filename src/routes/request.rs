@@ -46,6 +46,18 @@ struct CreateRequestBody {
     /// layer — e.g. a server-mixed nonce — once we have a clear story for it.
     #[serde(default)]
     request_id: Option<String>,
+    /// Opt-in capability flag. The bridge only surfaces `app_overrides` in the
+    /// response when the client explicitly advertises that it can parse it.
+    ///
+    /// Adding a field to the response is **not** safe for clients that reject
+    /// unknown JSON keys (e.g. a strict `kotlinx.serialization` decoder), and
+    /// those clients are already shipped — they can't be retroactively fixed.
+    /// Since `POST /request` carries no platform/version, gate the field behind
+    /// an explicit flag instead: clients that predate the feature omit it and
+    /// get the lean `{request_id}` response, so a server-side override rollout
+    /// can never break them. Updated SDKs send `true` to receive overrides.
+    #[serde(default)]
+    supports_app_overrides: bool,
 }
 
 #[derive(Debug, serde::Serialize, JsonSchema)]
@@ -53,8 +65,11 @@ struct RequestCreatedPayload {
     /// The unique identifier for the request — the client-supplied value if
     /// one was provided, otherwise a server-generated UUID v4.
     request_id: String,
-    /// Temporary workaround for the World ID app rollout.
-    /// to configure deeplink values from the server and set app-specific overrides
+    /// Temporary workaround for the World ID app rollout: lets the server
+    /// configure deeplink values and app-specific overrides. Only populated for
+    /// clients that opt in via `supports_app_overrides`; omitted entirely
+    /// otherwise (empty map) so unaware clients see the legacy `{request_id}`
+    /// response shape.
     #[serde(skip_serializing_if = "AppOverrides::is_empty")]
     app_overrides: AppOverrides,
 }
@@ -207,8 +222,21 @@ async fn insert_request(
 
     Ok(Json(RequestCreatedPayload {
         request_id,
-        app_overrides: (*app_overrides).clone(),
+        app_overrides: select_response_overrides(body.supports_app_overrides, &app_overrides),
     }))
+}
+
+/// Pick the overrides to echo back on `POST /request`: the configured map for
+/// clients that opted in via `supports_app_overrides`, otherwise an empty map
+/// (omitted from the response). Keeps the field invisible to clients that
+/// predate the feature so a server-side override rollout can't break a strict,
+/// unknown-key-rejecting JSON parser.
+fn select_response_overrides(opted_in: bool, configured: &AppOverrides) -> AppOverrides {
+    if opted_in {
+        configured.clone()
+    } else {
+        AppOverrides::default()
+    }
 }
 
 /// Create a new request by ID idempotently — retries succeed, even if the request exists.
