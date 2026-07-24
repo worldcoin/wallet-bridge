@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
+use crate::observability;
 use crate::utils::{
     handle_redis_error, validate_request_id, AppOverrides, RequestPayload, RequestStatus,
     EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
@@ -23,7 +24,6 @@ use crate::utils::{
 
 const REQ_PREFIX: &str = "req:";
 const ACCEPT_IDKIT_FLOW_ID_HEADER: &str = "accept-idkit-flow-id";
-const IDKIT_FLOW_ID_PREFIX: &str = "idkitflow_";
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 struct CreateRequestBody {
@@ -78,12 +78,12 @@ struct RequestCreatedPayload {
 
 #[derive(Debug, serde::Serialize, JsonSchema)]
 struct RequestResponse {
-    /// The opaque encrypted request payload.
-    #[serde(flatten)]
-    payload: RequestPayload,
-    /// Correlates this handoff with compatible client telemetry.
+    /// The initialization vector for the encrypted payload.
+    iv: String,
+    /// The encrypted payload.
+    payload: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    idkit_flow_id: Option<String>,
+    idkit_flow_id: Option<Uuid>,
 }
 
 pub fn handler() -> ApiRouter {
@@ -99,8 +99,11 @@ pub fn handler() -> ApiRouter {
 
     // Base routes
     let mut router = ApiRouter::new()
-        .api_route("/request", post(insert_request))
-        .api_route("/request/:request_id", head(has_request).get(get_request))
+        .api_route("/request", post(insert_request_handler))
+        .api_route(
+            "/request/:request_id",
+            head(has_request).get(get_request_handler),
+        )
         .layer(cors);
 
     // Only enable PUT in staging
@@ -134,33 +137,65 @@ async fn has_request(
     }
 }
 
-async fn get_request(
+async fn get_request_handler(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
     headers: HeaderMap,
 ) -> Result<Json<RequestResponse>, StatusCode> {
     let request_id = request_id.to_lowercase();
-    if validate_request_id(&request_id).is_err() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let accept_idkit_flow_id = headers.contains_key(ACCEPT_IDKIT_FLOW_ID_HEADER);
+    let (payload, current_status) =
+        get_request(&mut redis, &request_id, accept_idkit_flow_id).await?;
 
-    // Use a transaction to get both status and request data atomically
+    // Keep request identifiers in the pre-existing operational logs outside
+    // the bounded root span created by `get_request`.
+    tracing::info!(
+        "Request {request_id} state transition: {} -> {}",
+        current_status,
+        RequestStatus::Retrieved
+    );
+
+    Ok(payload)
+}
+
+#[tracing::instrument(
+    parent = None,
+    name = "wallet_bridge.request.consume",
+    skip_all,
+    fields(
+        idkit_flow_id = tracing::field::Empty,
+        http.route = "/request/:request_id",
+        queue_age_ms = tracing::field::Empty,
+    )
+)]
+async fn get_request(
+    redis: &mut ConnectionManager,
+    request_id: &str,
+    accept_idkit_flow_id: bool,
+) -> Result<(Json<RequestResponse>, RequestStatus), StatusCode> {
+    validate_request_id(request_id)?;
+
+    // MULTI/EXEC keeps the status, one-time payload consumption, and flow
+    // metadata snapshot consistent without requiring Redis Lua.
     let mut pipe = redis::pipe();
-    pipe.get(format!("{REQ_STATUS_PREFIX}{request_id}"))
-        .get_del(format!("{REQ_PREFIX}{request_id}"));
+    pipe.atomic()
+        .get(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .get_del(format!("{REQ_PREFIX}{request_id}"))
+        .get(observability::flow_key(request_id));
 
-    let (status, value): (Option<String>, Option<Vec<u8>>) = pipe
-        .query_async(&mut redis)
-        .await
-        .map_err(handle_redis_error)?;
+    let (status, value, flow): (Option<String>, Option<Vec<u8>>, Option<String>) =
+        pipe.query_async(redis).await.map_err(handle_redis_error)?;
 
     let current_status = status
-        .and_then(|s| RequestStatus::from_str(&s).ok())
+        .and_then(|status| RequestStatus::from_str(&status).ok())
         .unwrap_or(RequestStatus::Initialized);
 
     let value = value.ok_or(StatusCode::NOT_FOUND)?;
+    let RequestPayload { iv, payload } =
+        serde_json::from_slice(&value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    //ANCHOR - Update the status of the request
+    // Preserve the existing status behavior: consuming the payload resets
+    // the status TTL and a failure remains a request failure.
     redis
         .set_ex::<_, _, ()>(
             format!("{REQ_STATUS_PREFIX}{request_id}"),
@@ -170,43 +205,67 @@ async fn get_request(
         .await
         .map_err(handle_redis_error)?;
 
-    tracing::info!(
-        "Request {request_id} state transition: {} -> {}",
+    let idkit_flow_id =
+        observability::observe_request_handoff(redis, request_id, flow.as_deref()).await;
+
+    Ok((
+        Json(RequestResponse {
+            iv,
+            payload,
+            idkit_flow_id: if accept_idkit_flow_id {
+                idkit_flow_id
+            } else {
+                None
+            },
+        }),
         current_status,
-        RequestStatus::Retrieved
-    );
-
-    let payload: RequestPayload =
-        serde_json::from_slice(&value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let idkit_flow_id = accepts_idkit_flow_id(&headers)
-        .then(|| format!("{IDKIT_FLOW_ID_PREFIX}{}", Uuid::new_v4()));
-
-    Ok(Json(RequestResponse {
-        payload,
-        idkit_flow_id,
-    }))
-}
-
-/// Treat the opt-in header as enabled only for the explicit value `true`.
-///
-/// Header names are case-insensitive; the value comparison is also
-/// case-insensitive for compatibility with common HTTP clients.
-fn accepts_idkit_flow_id(headers: &HeaderMap) -> bool {
-    headers
-        .get(ACCEPT_IDKIT_FLOW_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    ))
 }
 
 /// Create a new request. Optionally accepts a client-supplied `request_id`
 /// with NX semantics; otherwise generates a UUID v4.
-async fn insert_request(
+async fn insert_request_handler(
     Extension(mut redis): Extension<ConnectionManager>,
     Extension(app_overrides): Extension<Arc<AppOverrides>>,
     Json(body): Json<CreateRequestBody>,
 ) -> Result<Json<RequestCreatedPayload>, StatusCode> {
-    let request_id = match body.request_id {
+    let payload = insert_request(&mut redis, &app_overrides, body).await?;
+
+    // Keep request identifiers in the pre-existing operational logs, outside
+    // the bounded root span created by `insert_request`.
+    tracing::info!("Processing /request: {}", payload.request_id);
+    tracing::info!(
+        "Request {} state transition: new -> {}",
+        payload.request_id,
+        RequestStatus::Initialized
+    );
+    tracing::info!("Successfully processed /request: {}", payload.request_id);
+
+    Ok(Json(payload))
+}
+
+#[tracing::instrument(
+    parent = None,
+    name = "wallet_bridge.request.create",
+    skip_all,
+    fields(
+        idkit_flow_id = tracing::field::Empty,
+        http.route = "/request",
+    )
+)]
+async fn insert_request(
+    redis: &mut ConnectionManager,
+    app_overrides: &AppOverrides,
+    body: CreateRequestBody,
+) -> Result<RequestCreatedPayload, StatusCode> {
+    let CreateRequestBody {
+        iv,
+        payload,
+        request_id,
+        supports_app_overrides,
+    } = body;
+
+    let request_id = match request_id {
         Some(id) => {
             let id = id.to_lowercase();
             validate_request_id(&id)?;
@@ -215,9 +274,7 @@ async fn insert_request(
         None => Uuid::new_v4().to_string(),
     };
 
-    tracing::info!("Processing /request: {request_id}");
-
-    let payload = RequestPayload::new(body.iv, body.payload);
+    let payload = RequestPayload::new(iv, payload);
     let payload_bytes =
         serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -244,17 +301,14 @@ async fn insert_request(
         .await
         .map_err(handle_redis_error)?;
 
-    tracing::info!(
-        "Request {request_id} state transition: new -> {}",
-        RequestStatus::Initialized
-    );
+    if let Err(outcome) = observability::mint_and_store_idkit_flow_id(redis, &request_id).await {
+        tracing::warn!(outcome, "Failed to mint and store IDKit flow ID");
+    }
 
-    tracing::info!("Successfully processed /request: {request_id}");
-
-    Ok(Json(RequestCreatedPayload {
+    Ok(RequestCreatedPayload {
         request_id,
-        app_overrides: select_response_overrides(body.supports_app_overrides, &app_overrides),
-    }))
+        app_overrides: select_response_overrides(supports_app_overrides, app_overrides),
+    })
 }
 
 /// Pick the overrides to echo back on `POST /request`: the configured map for
