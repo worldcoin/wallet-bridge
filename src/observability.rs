@@ -83,6 +83,12 @@ pub async fn mint_and_store_idkit_flow_id(
     Ok(idkit_flow_id)
 }
 
+pub fn record_idkit_flow_id(value: Option<&str>) {
+    if let FlowMetadataSnapshot::Present(metadata) = FlowMetadataSnapshot::from_redis(value) {
+        record_flow(&metadata);
+    }
+}
+
 pub async fn observe_request_handoff(
     redis: &mut ConnectionManager,
     request_id: &str,
@@ -105,6 +111,43 @@ pub async fn observe_request_handoff(
     }
 
     Some(idkit_flow_id)
+}
+
+pub fn observe_response_handoff(value: Option<&str>) {
+    let Some(metadata) = metadata_or_warn(value, "response_handoff") else {
+        return;
+    };
+
+    observe_handoff(&metadata, metadata.response_persisted_at_ms, "response");
+}
+
+pub async fn record_response_persisted(
+    redis: &mut ConnectionManager,
+    request_id: &str,
+    value: Option<&str>,
+) {
+    let Some(mut metadata) = metadata_or_warn(value, "response_persisted") else {
+        return;
+    };
+    record_flow(&metadata);
+
+    let Some(response_persisted_at_ms) = now_ms() else {
+        tracing::warn!(
+            outcome = "clock_unavailable",
+            operation = "response_persisted",
+            "Failed to persist IDKit flow metadata"
+        );
+        return;
+    };
+
+    metadata.response_persisted_at_ms = Some(response_persisted_at_ms);
+    if let Err(outcome) = persist_flow_metadata(redis, request_id, &metadata).await {
+        tracing::warn!(
+            outcome,
+            operation = "response_persisted",
+            "Failed to persist IDKit flow metadata"
+        );
+    }
 }
 
 fn metadata_or_warn(value: Option<&str>, operation: &'static str) -> Option<IDKitFlowMetadata> {

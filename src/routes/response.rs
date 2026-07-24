@@ -16,6 +16,7 @@ use std::str;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
+use crate::observability;
 use crate::utils::{
     handle_redis_error, validate_request_id, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS,
     REQ_STATUS_PREFIX,
@@ -44,81 +45,108 @@ pub fn handler() -> ApiRouter {
     ApiRouter::new()
         .api_route(
             "/response/:request_id",
-            get(get_response)
+            get(get_response_handler)
                 .head(has_response_status)
-                .put(insert_response)
+                .put(insert_response_handler)
                 .layer(cors.clone()),
         )
         .api_route("/response", post(create_response).layer(cors))
 }
 
-async fn get_response(
+async fn get_response_handler(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
 ) -> Result<Json<Response>, StatusCode> {
     let request_id = request_id.to_lowercase();
-    if validate_request_id(&request_id).is_err() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let (response, current_status) = get_response(&mut redis, &request_id).await?;
 
-    // Use a transaction to get both status and response atomically
-    let mut pipe = redis::pipe();
-    pipe.get(format!("{REQ_STATUS_PREFIX}{request_id}"))
-        .get_del(format!("{RES_PREFIX}{request_id}"));
-
-    let (status, value): (Option<String>, Option<Vec<u8>>) = pipe
-        .query_async(&mut redis)
-        .await
-        .map_err(handle_redis_error)?;
-
-    if let Some(value) = value {
-        let current_status = status
-            .and_then(|s| RequestStatus::from_str(&s).ok())
-            .unwrap_or(RequestStatus::Retrieved);
-
+    if let Some(current_status) = current_status {
+        // Keep request identifiers in the pre-existing operational logs outside
+        // the bounded root span created by `get_response`.
         tracing::info!(
             "Request {request_id} state transition: {} -> {}",
             current_status,
             RequestStatus::Completed
         );
-
-        // Best-effort status cleanup (will expire via TTL anyway)
-        // Don't propagate errors to avoid losing response data if status delete fails
-        if let Err(e) = redis
-            .del::<_, ()>(format!("{REQ_STATUS_PREFIX}{request_id}"))
-            .await
-        {
-            tracing::warn!(
-                "Failed to delete status for {request_id} after response retrieval: {e}"
-            );
-        }
-
-        return serde_json::from_slice(&value).map_or(
-            Err(StatusCode::INTERNAL_SERVER_ERROR),
-            |value| {
-                Ok(Json(Response {
-                    response: value,
-                    status: RequestStatus::Completed,
-                }))
-            },
-        );
     }
 
-    //ANCHOR - Return the current status for the request
-    // If no response exists, use the status we already got from the transaction
-    let Some(status) = status else {
-        return Err(StatusCode::NOT_FOUND);
-    };
+    Ok(response)
+}
 
-    let status: RequestStatus = RequestStatus::from_str(&status).map_err(|e| {
-        tracing::error!("Failed to parse status: {e}");
+#[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    parent = None,
+    name = "wallet_bridge.response.consume",
+    skip_all,
+    fields(
+        idkit_flow_id = tracing::field::Empty,
+        http.route = "/response/:request_id",
+        queue_age_ms = tracing::field::Empty,
+    )
+)]
+async fn get_response(
+    redis: &mut ConnectionManager,
+    request_id: &str,
+) -> Result<(Json<Response>, Option<RequestStatus>), StatusCode> {
+    validate_request_id(request_id)?;
+
+    // MULTI/EXEC keeps the status, one-time response consumption, and flow
+    // metadata snapshot consistent without requiring Redis Lua.
+    let mut pipe = redis::pipe();
+    pipe.atomic()
+        .get(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .get_del(format!("{RES_PREFIX}{request_id}"))
+        .get(observability::flow_key(request_id));
+
+    let (status, value, flow): (Option<String>, Option<Vec<u8>>, Option<String>) =
+        pipe.query_async(redis).await.map_err(handle_redis_error)?;
+
+    observability::record_idkit_flow_id(flow.as_deref());
+
+    if let Some(value) = value {
+        let current_status = status
+            .and_then(|status| RequestStatus::from_str(&status).ok())
+            .unwrap_or(RequestStatus::Retrieved);
+        let response =
+            serde_json::from_slice(&value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        observability::observe_response_handoff(flow.as_deref());
+
+        // Best-effort cleanup after GETDEL. The flow record remains
+        // self-expiring if this command fails, and response delivery is
+        // never turned into an error after the payload was consumed.
+        let mut cleanup = redis::pipe();
+        cleanup
+            .atomic()
+            .del(format!("{REQ_STATUS_PREFIX}{request_id}"))
+            .del(observability::flow_key(request_id));
+        if cleanup.query_async::<(u64, u64)>(redis).await.is_err() {
+            tracing::warn!("Failed to clean up IDKit flow metadata");
+        }
+
+        return Ok((
+            Json(Response {
+                response,
+                status: RequestStatus::Completed,
+            }),
+            Some(current_status),
+        ));
+    }
+
+    // Return the current status for polling requests.
+    let status = status.ok_or(StatusCode::NOT_FOUND)?;
+    let status = RequestStatus::from_str(&status).map_err(|error| {
+        tracing::error!("Failed to parse status: {error}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    Ok(Json(Response {
-        status,
-        response: None,
-    }))
+    Ok((
+        Json(Response {
+            status,
+            response: None,
+        }),
+        None,
+    ))
 }
 
 async fn has_response_status(
@@ -144,36 +172,67 @@ async fn has_response_status(
     }
 }
 
-async fn insert_response(
+async fn insert_response_handler(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
     let request_id = request_id.to_lowercase();
-    validate_request_id(&request_id)?;
+    let (status, current_status) = insert_response(&mut redis, &request_id, &request).await?;
 
-    //ANCHOR - Check the request is valid
-    let current_status = redis
-        .get::<_, Option<String>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
-        .await
-        .map_err(handle_redis_error)?
-        .and_then(|s| RequestStatus::from_str(&s).ok());
+    // Keep request identifiers in the pre-existing operational logs outside
+    // the bounded root span created by `insert_response`.
+    tracing::info!(
+        "Request {request_id} state transition: {} -> {}",
+        current_status,
+        RequestStatus::Completed
+    );
 
+    Ok(status)
+}
+
+#[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    parent = None,
+    name = "wallet_bridge.response.create",
+    skip_all,
+    fields(
+        idkit_flow_id = tracing::field::Empty,
+        http.route = "/response/:request_id",
+    )
+)]
+async fn insert_response(
+    redis: &mut ConnectionManager,
+    request_id: &str,
+    request: &RequestPayload,
+) -> Result<(StatusCode, RequestStatus), StatusCode> {
+    validate_request_id(request_id)?;
+
+    // Snapshot the state and tracing metadata in one native Redis
+    // transaction. The response payload still uses SET NX for concurrency.
+    let mut pipe = redis::pipe();
+    pipe.atomic()
+        .get(format!("{REQ_STATUS_PREFIX}{request_id}"))
+        .get(observability::flow_key(request_id));
+    let (status, flow): (Option<String>, Option<String>) =
+        pipe.query_async(redis).await.map_err(handle_redis_error)?;
+
+    let current_status = status.and_then(|status| RequestStatus::from_str(&status).ok());
     let Some(current_status) = current_status else {
         return Err(StatusCode::BAD_REQUEST);
     };
 
-    //ANCHOR - Atomically store the response with TTL if not already set (idempotent)
+    observability::record_idkit_flow_id(flow.as_deref());
+
+    let payload = serde_json::to_vec(request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Atomically store the response with TTL if not already set.
     let options = SetOptions::default()
         .conditional_set(ExistenceCheck::NX)
         .with_expiration(SetExpiry::EX(EXPIRE_AFTER_SECONDS));
 
     let set_ok: Option<String> = redis
-        .set_options(
-            format!("{RES_PREFIX}{request_id}"),
-            serde_json::to_vec(&request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-            options,
-        )
+        .set_options(format!("{RES_PREFIX}{request_id}"), payload, options)
         .await
         .map_err(handle_redis_error)?;
 
@@ -181,20 +240,16 @@ async fn insert_response(
         return Err(StatusCode::CONFLICT);
     }
 
-    tracing::info!(
-        "Request {request_id} state transition: {} -> {}",
-        current_status,
-        RequestStatus::Completed
-    );
-
-    //ANCHOR - Delete status
-    //NOTE - We can delete the status at this point as the presence of a response implies the request is complete
+    // Preserve the existing status semantics. Once this succeeds, metadata
+    // failures below are strictly best effort.
     redis
         .del::<_, ()>(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
         .map_err(handle_redis_error)?;
 
-    Ok(StatusCode::CREATED)
+    observability::record_response_persisted(redis, request_id, flow.as_deref()).await;
+
+    Ok((StatusCode::CREATED, current_status))
 }
 
 /// Create a new standalone response (World App initiates)

@@ -1,7 +1,10 @@
 use curl::easy::{Easy, List};
+use redis::Commands;
 use serde_json::{json, Value};
 use std::env;
 use std::io::Read;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use uuid::Uuid;
 
 /// Helper to get the base URL for the wallet bridge service
@@ -9,10 +12,45 @@ fn get_base_url() -> String {
     env::var("WALLET_BRIDGE_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())
 }
 
+fn redis_connection() -> redis::Connection {
+    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    redis::Client::open(redis_url)
+        .expect("valid Redis URL")
+        .get_connection()
+        .expect("connect to integration-test Redis")
+}
+
+fn flow_key(request_id: &str) -> String {
+    format!("flow:{request_id}")
+}
+
+fn flow_metadata(request_id: &str) -> Option<Value> {
+    let raw: Option<String> = redis_connection()
+        .get(flow_key(request_id))
+        .expect("read flow metadata");
+    raw.map(|raw| serde_json::from_str(&raw).expect("flow metadata is valid JSON"))
+}
+
+fn redis_ttl(key: &str) -> i64 {
+    redis_connection().ttl(key).expect("read Redis TTL")
+}
+
 /// Helper to perform a GET request and return (status_code, body)
 fn http_get(url: &str) -> (u32, String) {
+    http_get_with_headers(url, &[])
+}
+
+fn http_get_with_headers(url: &str, headers: &[&str]) -> (u32, String) {
     let mut easy = Easy::new();
     easy.url(url).unwrap();
+
+    if !headers.is_empty() {
+        let mut header_list = List::new();
+        for header in headers {
+            header_list.append(header).unwrap();
+        }
+        easy.http_headers(header_list).unwrap();
+    }
 
     let mut response_body = Vec::new();
     {
@@ -653,4 +691,307 @@ fn test_openapi_endpoint() {
 
     let json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
     assert!(json.get("openapi").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// WDP85 tracing metadata. This data lives in a separate, expiring Redis record.
+// GET /request exposes the flow ID only when the caller explicitly opts in.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_flow_metadata_lifecycle_timestamps_ttls_and_cleanup() {
+    let base_url = get_base_url();
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "lifecycle-request-iv",
+        "payload": "lifecycle-request-payload",
+    });
+
+    let (create_status, create_body) = http_post(&format!("{base_url}/request"), &request);
+    assert_eq!(create_status, 200, "request creation failed: {create_body}");
+    let create_json: Value = serde_json::from_str(&create_body).unwrap();
+    assert_eq!(create_json["request_id"], request_id);
+    assert!(
+        create_json.get("idkit_flow_id").is_none(),
+        "flow identifiers must not be exposed by POST /request"
+    );
+
+    let created_metadata = flow_metadata(&request_id).expect("flow metadata after request create");
+    let flow_id = created_metadata["idkit_flow_id"]
+        .as_str()
+        .expect("idkit_flow_id");
+    Uuid::parse_str(flow_id).expect("idkit_flow_id is a UUID");
+    let request_persisted_at_ms = created_metadata["request_persisted_at_ms"]
+        .as_u64()
+        .expect("request_persisted_at_ms");
+    assert!(request_persisted_at_ms > 0);
+    assert!(created_metadata.get("response_persisted_at_ms").is_none());
+    let created_ttl = redis_ttl(&flow_key(&request_id));
+    assert!((1..=900).contains(&created_ttl));
+
+    let (request_status, request_body) = http_get(&format!("{base_url}/request/{request_id}"));
+    assert_eq!(
+        request_status, 200,
+        "request consumption failed: {request_body}"
+    );
+    let request_json: Value = serde_json::from_str(&request_body).unwrap();
+    assert_eq!(
+        request_json,
+        json!({
+            "iv": "lifecycle-request-iv",
+            "payload": "lifecycle-request-payload",
+        }),
+        "GET /request response schema must stay unchanged"
+    );
+    assert!(
+        flow_metadata(&request_id).is_some(),
+        "request consumption refreshes metadata for the response leg"
+    );
+
+    let response = json!({
+        "iv": "lifecycle-response-iv",
+        "payload": "lifecycle-response-payload",
+    });
+    let (put_status, put_body) = http_put(&format!("{base_url}/response/{request_id}"), &response);
+    assert_eq!(put_status, 201, "response creation failed: {put_body}");
+
+    let response_metadata =
+        flow_metadata(&request_id).expect("flow metadata after response create");
+    assert_eq!(response_metadata["idkit_flow_id"], flow_id);
+    assert_eq!(
+        response_metadata["request_persisted_at_ms"],
+        request_persisted_at_ms
+    );
+    let response_persisted_at_ms = response_metadata["response_persisted_at_ms"]
+        .as_u64()
+        .expect("response_persisted_at_ms");
+    assert!(response_persisted_at_ms >= request_persisted_at_ms);
+    let response_ttl = redis_ttl(&flow_key(&request_id));
+    assert!((1..=900).contains(&response_ttl));
+
+    let (get_status, get_body) = http_get(&format!("{base_url}/response/{request_id}"));
+    assert_eq!(get_status, 200, "response consumption failed: {get_body}");
+    let get_json: Value = serde_json::from_str(&get_body).unwrap();
+    assert_eq!(get_json["status"], "completed");
+    assert_eq!(get_json["response"], response);
+    assert!(
+        get_json.get("idkit_flow_id").is_none(),
+        "GET /response must not expose flow identifiers"
+    );
+    assert!(
+        flow_metadata(&request_id).is_none(),
+        "flow metadata is deleted after response consumption"
+    );
+    assert_eq!(redis_ttl(&format!("req:status:{request_id}")), -2);
+}
+
+#[test]
+fn test_flow_ids_are_unique_and_never_replace_request_ids() {
+    let base_url = get_base_url();
+    let first_id = fresh_id();
+    let second_id = fresh_id();
+
+    for request_id in [&first_id, &second_id] {
+        let body = json!({
+            "request_id": request_id,
+            "iv": "unique-iv",
+            "payload": "unique-payload",
+        });
+        let (status, response) = http_post(&format!("{base_url}/request"), &body);
+        assert_eq!(status, 200);
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["request_id"], request_id.as_str());
+        assert!(response.get("idkit_flow_id").is_none());
+    }
+
+    let first_flow = flow_metadata(&first_id).unwrap();
+    let second_flow = flow_metadata(&second_id).unwrap();
+    assert_ne!(first_flow["idkit_flow_id"], second_flow["idkit_flow_id"]);
+    assert_ne!(first_flow["idkit_flow_id"], first_id);
+    assert_ne!(second_flow["idkit_flow_id"], second_id);
+}
+
+#[test]
+fn test_get_request_returns_idkit_flow_id_only_when_requested() {
+    let base_url = get_base_url();
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "flow-id-header-iv",
+        "payload": "flow-id-header-payload",
+    });
+
+    let (create_status, create_body) = http_post(&format!("{base_url}/request"), &request);
+    assert_eq!(create_status, 200, "request creation failed: {create_body}");
+
+    let flow = flow_metadata(&request_id).expect("flow metadata after request create");
+    let expected_flow_id = flow["idkit_flow_id"].as_str().expect("idkit_flow_id");
+
+    let (get_status, get_body) = http_get_with_headers(
+        &format!("{base_url}/request/{request_id}"),
+        &["Accept-IDKit-Flow-ID: true"],
+    );
+    assert_eq!(get_status, 200, "request consumption failed: {get_body}");
+
+    let response: Value = serde_json::from_str(&get_body).unwrap();
+    assert_eq!(response["iv"], "flow-id-header-iv");
+    assert_eq!(response["payload"], "flow-id-header-payload");
+    assert_eq!(response["idkit_flow_id"], expected_flow_id);
+}
+
+#[test]
+fn test_concurrent_consumers_keep_request_and_response_one_time() {
+    const CONSUMERS: usize = 8;
+
+    let base_url = get_base_url();
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "concurrent-request-iv",
+        "payload": "concurrent-request-payload",
+    });
+    let (status, body) = http_post(&format!("{base_url}/request"), &request);
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    let request_url = format!("{base_url}/request/{request_id}");
+    let barrier = Arc::new(Barrier::new(CONSUMERS));
+    let consumers: Vec<_> = (0..CONSUMERS)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let request_url = request_url.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                http_get(&request_url).0
+            })
+        })
+        .collect();
+    let statuses: Vec<_> = consumers
+        .into_iter()
+        .map(|consumer| consumer.join().unwrap())
+        .collect();
+    assert_eq!(statuses.iter().filter(|&&status| status == 200).count(), 1);
+    assert_eq!(
+        statuses.iter().filter(|&&status| status == 404).count(),
+        CONSUMERS - 1
+    );
+
+    let response = json!({
+        "iv": "concurrent-response-iv",
+        "payload": "concurrent-response-payload",
+    });
+    let (status, body) = http_put(&format!("{base_url}/response/{request_id}"), &response);
+    assert_eq!(status, 201, "response creation failed: {body}");
+
+    let response_url = format!("{base_url}/response/{request_id}");
+    let barrier = Arc::new(Barrier::new(CONSUMERS));
+    let consumers: Vec<_> = (0..CONSUMERS)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let response_url = response_url.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                http_get(&response_url).0
+            })
+        })
+        .collect();
+    let statuses: Vec<_> = consumers
+        .into_iter()
+        .map(|consumer| consumer.join().unwrap())
+        .collect();
+    assert_eq!(statuses.iter().filter(|&&status| status == 200).count(), 1);
+    assert_eq!(
+        statuses.iter().filter(|&&status| status == 404).count(),
+        CONSUMERS - 1
+    );
+}
+
+#[test]
+fn test_legacy_missing_flow_metadata_does_not_break_round_trip() {
+    let base_url = get_base_url();
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "legacy-request-iv",
+        "payload": "legacy-request-payload",
+    });
+    let (status, body) = http_post(&format!("{base_url}/request"), &request);
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    let deleted: usize = redis_connection()
+        .del(flow_key(&request_id))
+        .expect("delete flow metadata");
+    assert_eq!(deleted, 1);
+
+    let (status, body) = http_get(&format!("{base_url}/request/{request_id}"));
+    assert_eq!(status, 200, "legacy request consumption failed: {body}");
+
+    let response = json!({
+        "iv": "legacy-response-iv",
+        "payload": "legacy-response-payload",
+    });
+    let (status, body) = http_put(&format!("{base_url}/response/{request_id}"), &response);
+    assert_eq!(status, 201, "legacy response creation failed: {body}");
+
+    let (status, body) = http_get(&format!("{base_url}/response/{request_id}"));
+    assert_eq!(status, 200, "legacy response consumption failed: {body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["response"], response);
+}
+
+#[test]
+fn test_malformed_flow_metadata_is_best_effort() {
+    let base_url = get_base_url();
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "malformed-request-iv",
+        "payload": "malformed-request-payload",
+    });
+    let (status, body) = http_post(&format!("{base_url}/request"), &request);
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    redis_connection()
+        .set_ex::<_, _, ()>(flow_key(&request_id), b"not-json", 900)
+        .expect("inject malformed flow metadata");
+
+    let (status, body) = http_get(&format!("{base_url}/request/{request_id}"));
+    assert_eq!(
+        status, 200,
+        "metadata parse failure must not break request consumption: {body}"
+    );
+
+    let response = json!({
+        "iv": "malformed-response-iv",
+        "payload": "malformed-response-payload",
+    });
+    let (status, body) = http_put(&format!("{base_url}/response/{request_id}"), &response);
+    assert_eq!(
+        status, 201,
+        "metadata parse failure must not break response creation: {body}"
+    );
+
+    let (status, body) = http_get(&format!("{base_url}/response/{request_id}"));
+    assert_eq!(
+        status, 200,
+        "metadata parse failure must not break response consumption: {body}"
+    );
+    assert!(flow_metadata(&request_id).is_none());
+}
+
+#[test]
+fn test_standalone_response_does_not_create_idkit_flow_metadata() {
+    let base_url = get_base_url();
+    let response = json!({
+        "iv": "standalone-untraced-iv",
+        "payload": "standalone-untraced-payload",
+    });
+    let (status, body) = http_post(&format!("{base_url}/response"), &response);
+    assert_eq!(status, 201, "standalone response creation failed: {body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    let request_id = body["request_id"].as_str().unwrap();
+    assert!(
+        flow_metadata(request_id).is_none(),
+        "standalone response flows stay outside WDP85 tracing"
+    );
 }
