@@ -81,9 +81,9 @@ impl FromStr for RequestStatus {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct RequestPayload {
     /// The initialization vector for the encrypted payload
-    iv: String,
+    pub(crate) iv: String,
     /// The encrypted payload
-    payload: String,
+    pub(crate) payload: String,
 }
 
 impl RequestPayload {

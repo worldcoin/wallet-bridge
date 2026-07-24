@@ -29,4 +29,5 @@ chrono = "0.4.26"
 
 [dev-dependencies]
 curl = "0.4"
+metrics-util = "0.20.1"
 tokio-test = "0.4"

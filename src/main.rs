@@ -5,6 +5,7 @@ use redis::aio::ConnectionManager;
 use std::env;
 use std::sync::Arc;
 
+mod observability;
 mod routes;
 mod server;
 mod utils;
