@@ -1,36 +1,18 @@
 use std::{env, net::SocketAddr, sync::Arc};
 
-use aide::openapi::{Info, License, OpenApi};
-use axum::{extract::DefaultBodyLimit, Extension};
 use redis::aio::ConnectionManager;
 use tokio::{net::TcpListener, signal};
 
-use crate::routes;
 use crate::utils::AppOverrides;
 
+/// Bind the configured address and serve the bridge until a shutdown signal.
+///
+/// # Panics
+///
+/// Panics if `PORT` is set but not parseable as a port, if binding the TCP
+/// listener fails, or if the server exits with an error.
 pub async fn start(redis: ConnectionManager, app_overrides: Arc<AppOverrides>) {
-    let mut openapi = OpenApi {
-        info: Info {
-            title: "Wallet Bridge".to_string(),
-            summary: Some(
-                "An end-to-end encrypted bridge for communicating with World App.".to_string(),
-            ),
-            license: Some(License {
-                name: "MIT".to_string(),
-                identifier: Some("MIT".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let app = routes::handler()
-        .finish_api(&mut openapi)
-        .layer(Extension(redis))
-        .layer(Extension(app_overrides))
-        .layer(Extension(openapi))
-        .layer(DefaultBodyLimit::max(5 * 1024 * 1024));
+    let router = crate::app(redis, app_overrides);
 
     let address = SocketAddr::from((
         [0, 0, 0, 0],
@@ -40,9 +22,9 @@ pub async fn start(redis: ConnectionManager, app_overrides: Arc<AppOverrides>) {
         .await
         .expect("Failed to bind address");
 
-    println!("🪩 World Bridge started on http://{address}");
+    println!("🔛💬 Message Bridge started on http://{address}");
 
-    axum::serve(listener, app.into_make_service())
+    axum::serve(listener, router.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("Failed to start server");

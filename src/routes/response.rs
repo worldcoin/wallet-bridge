@@ -197,7 +197,7 @@ async fn insert_response(
     Ok(StatusCode::CREATED)
 }
 
-/// Create a new standalone response (World App initiates)
+/// Create a new standalone response
 async fn create_response(
     Extension(mut redis): Extension<ConnectionManager>,
     Json(request): Json<RequestPayload>,
