@@ -5,11 +5,7 @@ use redis::aio::ConnectionManager;
 use std::env;
 use std::sync::Arc;
 
-mod routes;
-mod server;
-mod utils;
-
-use utils::AppOverrides;
+use world_id_bridge::utils::AppOverrides;
 
 #[tokio::main]
 async fn main() {
@@ -56,7 +52,7 @@ async fn main() {
 
     let app_overrides = Arc::new(load_app_overrides());
 
-    server::start(redis, app_overrides).await;
+    world_id_bridge::server::start(redis, app_overrides).await;
 }
 
 /// Load the per-`app_id` URL override map from the `APP_URL_OVERRIDES` env var.
