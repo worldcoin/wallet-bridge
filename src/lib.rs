@@ -8,7 +8,7 @@ use redis::aio::ConnectionManager;
 
 use crate::utils::AppOverrides;
 
-mod observability;
+pub(crate) mod observability;
 pub mod routes;
 pub mod server;
 pub mod utils;

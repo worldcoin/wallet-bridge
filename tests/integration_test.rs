@@ -61,10 +61,44 @@ async fn test_get_request_one_time_use() {
     let first_json: Value = serde_json::from_str(&first_body).expect("Failed to parse JSON");
     assert_eq!(first_json["iv"], "get_test_iv");
     assert_eq!(first_json["payload"], "get_test_payload");
+    assert!(
+        first_json.get("idkit_flow_id").is_none(),
+        "legacy response shape must omit the flow ID without an opt-in header"
+    );
 
     // Second GET should fail (one-time use)
     let (second_status, _) = common::get(&app, &get_url).await;
     assert_eq!(second_status, 404);
+}
+
+#[tokio::test]
+async fn test_get_request_returns_prefixed_flow_id_when_client_opts_in() {
+    let app = common::test_app().await;
+    let payload = json!({
+        "iv": "flow-id-test-iv",
+        "payload": "flow-id-test-payload"
+    });
+
+    let (create_status, create_body) = common::post(&app, "/request", &payload).await;
+    assert_eq!(create_status, 200);
+    let created: Value = serde_json::from_str(&create_body).unwrap();
+    let request_id = created["request_id"].as_str().unwrap();
+
+    let (get_status, get_body) = common::get_with_header(
+        &app,
+        &format!("/request/{request_id}"),
+        "accept-idkit-flow-id",
+        "true",
+    )
+    .await;
+    assert_eq!(get_status, 200);
+
+    let response: Value = serde_json::from_str(&get_body).unwrap();
+    let flow_id = response["idkit_flow_id"]
+        .as_str()
+        .expect("opted-in response should include a flow ID");
+    assert!(flow_id.starts_with("idkitflow_"));
+    assert!(Uuid::parse_str(flow_id.trim_start_matches("idkitflow_")).is_ok());
 }
 
 /// Test PUT /response/:id stores a response for a request
