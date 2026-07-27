@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Unless we are on the main branch, the workflow should stop and yield to a new run if new code is pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'main')}}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -133,4 +138,4 @@ jobs:
           toolchain: stable
 
       - name: Run integration tests
-        run: cargo test --test integration_test
+        run: cargo test
