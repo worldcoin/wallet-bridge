@@ -5,7 +5,8 @@ symmetric key off-band.
 
 The bridge is made so that it cannot eavesdrop on any messages. The bridge expects only ciphertext. **All clients MUST encrypt all payloads before submitting to the bridge.**.
 
-**Importantly** this bridge is completely agnostic to any client or environment, it simply relays messages, hence it implements no logic or opinions related to client handling.
+- **Importantly** this bridge is completely agnostic to any client or environment, it simply relays messages, hence it implements no logic or opinions related to client handling.
+- All messages received by this bridge are temporarily held for delivery, but are automatically purged after a period of time. This service has and SHOULD NOT have _persisting_ storage.
 
 ## Use Case: World ID Protocol
 
@@ -29,31 +30,22 @@ Bridge ->> IDKit: <response>
 - `GET /request/:id`: Called by Authenticator. Used to fetch the proof verification request. One time use.
 - `PUT /response/:id`: Called by Authenticator. Used to send the proof back to the application.
 - `GET /response/:id`: Called by IDKit. Continuous pulling to fetch the status of the request and the response if available. Response can only be retrieved once.
-- `POST /response`: Called by Authenticator. Creates a standalone response without a prior request.
 
-### Standalone Response Flow (Authenticator Initiates)
+### Standalone Response Flow
 
-Authenticator App initiates without a prior IDKit request:
+This flow allows a client to send a `/response` without first generating a `/request` first.
 
 ```mermaid
 sequenceDiagram
-    participant Authenticator
+    participant ClientA
     participant Bridge
-    participant IDKit
+    participant ClientB
 
-    Authenticator->>Bridge: POST /response (payload)
-    Bridge->>Authenticator: 201 CREATED {request_id}
-    IDKit->>Bridge: GET /response/:request_id
-    Bridge->>IDKit: 200 OK {response}
+    ClientA->>Bridge: POST /response (payload)
+    Bridge->>ClientA: 201 CREATED {request_id}
+    ClientB->>Bridge: GET /response/:request_id
+    Bridge->>ClientB: 200 OK {response}
 ```
-
-**World App workflow:**
-1. POST /response with encrypted payload
-2. Receive generated request_id
-3. Send request_id to IDKit
-4. IDKit retrieves response using GET /response/:request_id
-
-**TTL:** 15 minutes (900 seconds) - responses expire automatically
 
 ## Local Development
 
