@@ -11,13 +11,7 @@ use world_id_bridge::utils::AppOverrides;
 async fn main() {
     dotenv().ok();
 
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .json()
-        .with_target(false)
-        .flatten_event(true)
-        .without_time()
-        .init();
+    let _telemetry_guard = telemetry_batteries::init().expect("Failed to initialize telemetry");
 
     tracing::info!("Starting wallet bridge...");
 
