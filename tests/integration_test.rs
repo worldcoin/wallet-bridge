@@ -1,148 +1,37 @@
-use curl::easy::{Easy, List};
-use redis::Commands;
 use serde_json::{json, Value};
-use std::env;
-use std::io::Read;
-use std::sync::{Arc, Barrier};
-use std::thread;
+use std::sync::Arc;
+use tokio::sync::Barrier;
 use uuid::Uuid;
 
-/// Helper to get the base URL for the wallet bridge service
-fn get_base_url() -> String {
-    env::var("WALLET_BRIDGE_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())
-}
-
-fn redis_connection() -> redis::Connection {
-    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
-    redis::Client::open(redis_url)
-        .expect("valid Redis URL")
-        .get_connection()
-        .expect("connect to integration-test Redis")
-}
+use redis::AsyncCommands;
 
 fn flow_key(request_id: &str) -> String {
     format!("flow:{request_id}")
 }
 
-fn flow_metadata(request_id: &str) -> Option<Value> {
-    let raw: Option<String> = redis_connection()
+async fn flow_id(request_id: &str) -> Option<String> {
+    common::redis_connection()
+        .await
         .get(flow_key(request_id))
-        .expect("read flow metadata");
-    raw.map(|raw| serde_json::from_str(&raw).expect("flow metadata is valid JSON"))
+        .await
+        .expect("read flow ID")
 }
 
-fn redis_ttl(key: &str) -> i64 {
-    redis_connection().ttl(key).expect("read Redis TTL")
+async fn redis_ttl(key: &str) -> i64 {
+    common::redis_connection()
+        .await
+        .ttl(key)
+        .await
+        .expect("read Redis TTL")
 }
 
-/// Helper to perform a GET request and return (status_code, body)
-fn http_get(url: &str) -> (u32, String) {
-    http_get_with_headers(url, &[])
-}
-
-fn http_get_with_headers(url: &str, headers: &[&str]) -> (u32, String) {
-    let mut easy = Easy::new();
-    easy.url(url).unwrap();
-
-    if !headers.is_empty() {
-        let mut header_list = List::new();
-        for header in headers {
-            header_list.append(header).unwrap();
-        }
-        easy.http_headers(header_list).unwrap();
-    }
-
-    let mut response_body = Vec::new();
-    {
-        let mut transfer = easy.transfer();
-        transfer
-            .write_function(|data| {
-                response_body.extend_from_slice(data);
-                Ok(data.len())
-            })
-            .unwrap();
-        transfer.perform().unwrap();
-    }
-
-    let status_code = easy.response_code().unwrap();
-    let body = String::from_utf8(response_body).unwrap_or_default();
-    (status_code, body)
-}
-
-/// Helper to perform a POST request with JSON body and return (status_code, body)
-fn http_post(url: &str, json_body: &Value) -> (u32, String) {
-    let mut easy = Easy::new();
-    easy.url(url).unwrap();
-    easy.post(true).unwrap();
-
-    let json_string = json_body.to_string();
-    let mut json_bytes = json_string.as_bytes();
-    easy.post_field_size(json_bytes.len() as u64).unwrap();
-
-    let mut headers = List::new();
-    headers.append("Content-Type: application/json").unwrap();
-    easy.http_headers(headers).unwrap();
-
-    let mut response_body = Vec::new();
-    {
-        let mut transfer = easy.transfer();
-        transfer
-            .read_function(|buf| Ok(json_bytes.read(buf).unwrap_or(0)))
-            .unwrap();
-        transfer
-            .write_function(|data| {
-                response_body.extend_from_slice(data);
-                Ok(data.len())
-            })
-            .unwrap();
-        transfer.perform().unwrap();
-    }
-
-    let status_code = easy.response_code().unwrap();
-    let body = String::from_utf8(response_body).unwrap_or_default();
-    (status_code, body)
-}
-
-/// Helper to perform a PUT request with JSON body and return (status_code, body)
-fn http_put(url: &str, json_body: &Value) -> (u32, String) {
-    let mut easy = Easy::new();
-    easy.url(url).unwrap();
-    easy.put(true).unwrap();
-
-    let json_string = json_body.to_string();
-    let json_len = json_string.len();
-    let mut json_bytes = json_string.as_bytes();
-    easy.in_filesize(json_len as u64).unwrap();
-
-    let mut headers = List::new();
-    headers.append("Content-Type: application/json").unwrap();
-    easy.http_headers(headers).unwrap();
-
-    let mut response_body = Vec::new();
-    {
-        let mut transfer = easy.transfer();
-        transfer
-            .read_function(|buf| Ok(json_bytes.read(buf).unwrap_or(0)))
-            .unwrap();
-        transfer
-            .write_function(|data| {
-                response_body.extend_from_slice(data);
-                Ok(data.len())
-            })
-            .unwrap();
-        transfer.perform().unwrap();
-    }
-
-    let status_code = easy.response_code().unwrap();
-    let body = String::from_utf8(response_body).unwrap_or_default();
-    (status_code, body)
-}
+mod common;
 
 /// Test the root endpoint returns service information
-#[test]
-fn test_root_endpoint() {
-    let base_url = get_base_url();
-    let (status_code, body) = http_get(&base_url);
+#[tokio::test]
+async fn test_root_endpoint() {
+    let app = common::test_app().await;
+    let (status_code, body) = common::get(&app, "/").await;
 
     assert_eq!(status_code, 200);
 
@@ -152,16 +41,15 @@ fn test_root_endpoint() {
 }
 
 /// Test POST /request creates a new request and returns a request_id
-#[test]
-fn test_create_request() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_create_request() {
+    let app = common::test_app().await;
     let payload = json!({
         "iv": "test_iv",
         "payload": "test_payload"
     });
 
-    let url = format!("{}/request", base_url);
-    let (status_code, body) = http_post(&url, &payload);
+    let (status_code, body) = common::post(&app, "/request", &payload).await;
 
     assert_eq!(status_code, 200);
 
@@ -172,9 +60,9 @@ fn test_create_request() {
 }
 
 /// Test GET /request/:id retrieves the request (one-time use)
-#[test]
-fn test_get_request_one_time_use() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_get_request_one_time_use() {
+    let app = common::test_app().await;
 
     // Create a request
     let payload = json!({
@@ -182,32 +70,65 @@ fn test_get_request_one_time_use() {
         "payload": "get_test_payload"
     });
 
-    let create_url = format!("{}/request", base_url);
-    let (status_code, body) = http_post(&create_url, &payload);
+    let (status_code, body) = common::post(&app, "/request", &payload).await;
     assert_eq!(status_code, 200);
 
     let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
     let request_id = create_json["request_id"].as_str().unwrap();
 
     // First GET should succeed
-    let get_url = format!("{}/request/{}", base_url, request_id);
-    let (first_status, first_body) = http_get(&get_url);
+    let get_url = format!("/request/{request_id}");
+    let (first_status, first_body) = common::get(&app, &get_url).await;
 
     assert_eq!(first_status, 200);
 
     let first_json: Value = serde_json::from_str(&first_body).expect("Failed to parse JSON");
     assert_eq!(first_json["iv"], "get_test_iv");
     assert_eq!(first_json["payload"], "get_test_payload");
+    assert!(
+        first_json.get("idkit_flow_id").is_none(),
+        "legacy response shape must omit the flow ID without an opt-in header"
+    );
 
     // Second GET should fail (one-time use)
-    let (second_status, _) = http_get(&get_url);
+    let (second_status, _) = common::get(&app, &get_url).await;
     assert_eq!(second_status, 404);
 }
 
+#[tokio::test]
+async fn test_get_request_returns_prefixed_flow_id_when_client_opts_in() {
+    let app = common::test_app().await;
+    let payload = json!({
+        "iv": "flow-id-test-iv",
+        "payload": "flow-id-test-payload"
+    });
+
+    let (create_status, create_body) = common::post(&app, "/request", &payload).await;
+    assert_eq!(create_status, 200);
+    let created: Value = serde_json::from_str(&create_body).unwrap();
+    let request_id = created["request_id"].as_str().unwrap();
+
+    let (get_status, get_body) = common::get_with_header(
+        &app,
+        &format!("/request/{request_id}"),
+        "accept-idkit-flow-id",
+        "true",
+    )
+    .await;
+    assert_eq!(get_status, 200);
+
+    let response: Value = serde_json::from_str(&get_body).unwrap();
+    let flow_id = response["idkit_flow_id"]
+        .as_str()
+        .expect("opted-in response should include a flow ID");
+    assert!(flow_id.starts_with("idkitflow_"));
+    assert!(Uuid::parse_str(flow_id.trim_start_matches("idkitflow_")).is_ok());
+}
+
 /// Test PUT /response/:id stores a response for a request
-#[test]
-fn test_put_response_for_request() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_put_response_for_request() {
+    let app = common::test_app().await;
 
     // Create a request
     let request_payload = json!({
@@ -215,8 +136,7 @@ fn test_put_response_for_request() {
         "payload": "request_payload"
     });
 
-    let create_url = format!("{}/request", base_url);
-    let (status_code, body) = http_post(&create_url, &request_payload);
+    let (status_code, body) = common::post(&app, "/request", &request_payload).await;
     assert_eq!(status_code, 200);
 
     let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
@@ -228,16 +148,16 @@ fn test_put_response_for_request() {
         "payload": "response_payload"
     });
 
-    let put_url = format!("{}/response/{}", base_url, request_id);
-    let (put_status, _) = http_put(&put_url, &response_payload);
+    let put_url = format!("/response/{request_id}");
+    let (put_status, _) = common::put(&app, &put_url, &response_payload).await;
 
     assert_eq!(put_status, 201);
 }
 
 /// Test GET /response/:id retrieves the response
-#[test]
-fn test_get_response() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_get_response() {
+    let app = common::test_app().await;
 
     // Create a request
     let request_payload = json!({
@@ -245,8 +165,7 @@ fn test_get_response() {
         "payload": "req_payload"
     });
 
-    let create_url = format!("{}/request", base_url);
-    let (status_code, body) = http_post(&create_url, &request_payload);
+    let (status_code, body) = common::post(&app, "/request", &request_payload).await;
     assert_eq!(status_code, 200);
 
     let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
@@ -258,13 +177,13 @@ fn test_get_response() {
         "payload": "resp_payload"
     });
 
-    let put_url = format!("{}/response/{}", base_url, request_id);
-    let (put_status, _) = http_put(&put_url, &response_payload);
+    let put_url = format!("/response/{request_id}");
+    let (put_status, _) = common::put(&app, &put_url, &response_payload).await;
     assert_eq!(put_status, 201);
 
     // Get the response
-    let get_url = format!("{}/response/{}", base_url, request_id);
-    let (get_status, get_body) = http_get(&get_url);
+    let get_url = format!("/response/{request_id}");
+    let (get_status, get_body) = common::get(&app, &get_url).await;
 
     assert_eq!(get_status, 200);
 
@@ -275,9 +194,9 @@ fn test_get_response() {
 }
 
 /// Test GET /response/:id returns pending status when response not yet submitted
-#[test]
-fn test_response_pending_status() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_response_pending_status() {
+    let app = common::test_app().await;
 
     // Create a request
     let request_payload = json!({
@@ -285,16 +204,15 @@ fn test_response_pending_status() {
         "payload": "pending_payload"
     });
 
-    let create_url = format!("{}/request", base_url);
-    let (status_code, body) = http_post(&create_url, &request_payload);
+    let (status_code, body) = common::post(&app, "/request", &request_payload).await;
     assert_eq!(status_code, 200);
 
     let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
     let request_id = create_json["request_id"].as_str().unwrap();
 
     // Get response before it's been PUT (should show pending)
-    let get_url = format!("{}/response/{}", base_url, request_id);
-    let (get_status, get_body) = http_get(&get_url);
+    let get_url = format!("/response/{request_id}");
+    let (get_status, get_body) = common::get(&app, &get_url).await;
 
     assert_eq!(get_status, 200);
 
@@ -304,17 +222,16 @@ fn test_response_pending_status() {
 }
 
 /// Test POST /response creates a standalone response
-#[test]
-fn test_create_standalone_response() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_create_standalone_response() {
+    let app = common::test_app().await;
 
     let payload = json!({
         "iv": "standalone_iv",
         "payload": "standalone_payload"
     });
 
-    let url = format!("{}/response", base_url);
-    let (status_code, body) = http_post(&url, &payload);
+    let (status_code, body) = common::post(&app, "/response", &payload).await;
 
     assert_eq!(status_code, 201);
 
@@ -324,9 +241,9 @@ fn test_create_standalone_response() {
 }
 
 /// Test standalone response flow: POST /response then GET /response/:id
-#[test]
-fn test_standalone_response_flow() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_standalone_response_flow() {
+    let app = common::test_app().await;
 
     // Create standalone response
     let payload = json!({
@@ -334,16 +251,15 @@ fn test_standalone_response_flow() {
         "payload": "standalone_flow_payload"
     });
 
-    let create_url = format!("{}/response", base_url);
-    let (status_code, body) = http_post(&create_url, &payload);
+    let (status_code, body) = common::post(&app, "/response", &payload).await;
     assert_eq!(status_code, 201);
 
     let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
     let request_id = create_json["request_id"].as_str().unwrap();
 
     // Retrieve the response
-    let get_url = format!("{}/response/{}", base_url, request_id);
-    let (get_status, get_body) = http_get(&get_url);
+    let get_url = format!("/response/{request_id}");
+    let (get_status, get_body) = common::get(&app, &get_url).await;
 
     assert_eq!(get_status, 200);
 
@@ -354,40 +270,38 @@ fn test_standalone_response_flow() {
 }
 
 /// Test invalid request ID returns 404
-#[test]
-fn test_invalid_request_id() {
-    let base_url = get_base_url();
-    let url = format!("{}/request/00000000-0000-0000-0000-000000000000", base_url);
-    let (status_code, _) = http_get(&url);
+#[tokio::test]
+async fn test_invalid_request_id() {
+    let app = common::test_app().await;
+    let (status_code, _) = common::get(&app, "/request/00000000-0000-0000-0000-000000000000").await;
 
     assert_eq!(status_code, 404);
 }
 
 /// Test invalid response ID returns appropriate error
-#[test]
-fn test_invalid_response_id() {
-    let base_url = get_base_url();
-    let url = format!("{}/response/00000000-0000-0000-0000-000000000000", base_url);
-    let (status_code, _) = http_get(&url);
+#[tokio::test]
+async fn test_invalid_response_id() {
+    let app = common::test_app().await;
+    let (status_code, _) =
+        common::get(&app, "/response/00000000-0000-0000-0000-000000000000").await;
 
     // Should return 404 or an error status
-    assert!(status_code == 404 || (status_code >= 400 && status_code < 500));
+    assert!(status_code == 404 || (400..500).contains(&status_code));
 }
 
 /// Test that request requires both iv and payload fields
-#[test]
-fn test_create_request_validation() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_create_request_validation() {
+    let app = common::test_app().await;
 
     // Missing payload field
     let invalid_payload = json!({
         "iv": "test_iv"
     });
 
-    let url = format!("{}/request", base_url);
-    let (status_code, _) = http_post(&url, &invalid_payload);
+    let (status_code, _) = common::post(&app, "/request", &invalid_payload).await;
 
-    assert!(status_code >= 400 && status_code < 500);
+    assert!((400..500).contains(&status_code));
 }
 
 // ---------------------------------------------------------------------------
@@ -402,95 +316,86 @@ fn fresh_id() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
-#[test]
-fn test_create_request_with_client_supplied_id() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_create_request_with_client_supplied_id() {
+    let app = common::test_app().await;
     let id = fresh_id();
     let body = json!({
         "request_id": id,
         "iv": "iv-for-custom-id",
         "payload": "payload-for-custom-id",
     });
-    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    let (s, b) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 200, "POST /request with custom id should succeed: {b}");
     let v: Value = serde_json::from_str(&b).unwrap();
     assert_eq!(v["request_id"], id, "response echoes the supplied id");
 
-    let (gs, gb) = http_get(&format!("{base_url}/request/{id}"));
+    let (gs, gb) = common::get(&app, &format!("/request/{id}")).await;
     assert_eq!(gs, 200, "GET /request/<custom> should retrieve the payload");
     let gv: Value = serde_json::from_str(&gb).unwrap();
     assert_eq!(gv["iv"], "iv-for-custom-id");
     assert_eq!(gv["payload"], "payload-for-custom-id");
 
     // GETDEL semantics — second GET 404s.
-    let (gs2, _) = http_get(&format!("{base_url}/request/{id}"));
+    let (gs2, _) = common::get(&app, &format!("/request/{id}")).await;
     assert_eq!(gs2, 404);
 }
 
-#[test]
-fn test_create_request_with_duplicate_id_returns_409() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_create_request_with_duplicate_id_returns_409() {
+    let app = common::test_app().await;
     let id = fresh_id();
     let body = json!({"request_id": id, "iv": "x", "payload": "y"});
 
-    let (s1, _) = http_post(&format!("{base_url}/request"), &body);
+    let (s1, _) = common::post(&app, "/request", &body).await;
     assert_eq!(s1, 200);
 
-    let (s2, _) = http_post(&format!("{base_url}/request"), &body);
+    let (s2, _) = common::post(&app, "/request", &body).await;
     assert_eq!(s2, 409, "second POST with same request_id must 409");
 }
 
 // ---------------------------------------------------------------------------
 // Server-driven URL overrides. The bridge takes no `app_id` input — it returns
-// the whole `app_overrides` map blindly and the SDK picks its own entry.
-//
-// These tests require the bridge to be started with this exact fixture in the
-// `APP_URL_OVERRIDES` env var (CI and the README do this):
-//
-//   {"app_integration_override_fixture":
-//      {"app_clip_bundle_id":"org.example.integration.Clip",
-//       "verify_url":"https://world.org/verify"}}
+// the whole `app_overrides` map blindly and the SDK picks its own entry. The
+// harness injects the fixture directly into the router (see `common`), so these
+// tests need no `APP_URL_OVERRIDES` env var.
 // ---------------------------------------------------------------------------
 
-const FIXTURE_APP_ID: &str = "app_integration_override_fixture";
-const FIXTURE_APP_CLIP_BUNDLE_ID: &str = "org.example.integration.Clip";
-const FIXTURE_VERIFY_URL: &str = "https://world.org/verify";
-
-#[test]
-fn test_response_includes_full_override_map() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_response_includes_full_override_map() {
+    let app = common::test_app().await;
     // Opt in — the bridge only returns overrides to clients that advertise support.
     let body = json!({"iv": "x", "payload": "y", "supports_app_overrides": true});
 
-    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    let (s, b) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 200, "POST /request should succeed: {b}");
 
     let v: Value = serde_json::from_str(&b).unwrap();
     let entry = v
         .get("app_overrides")
-        .and_then(|m| m.get(FIXTURE_APP_ID))
-        .unwrap_or_else(|| panic!("app_overrides map must contain the fixture entry. Is APP_URL_OVERRIDES set to the test fixture? Got: {b}"));
+        .and_then(|m| m.get(common::FIXTURE_APP_ID))
+        .unwrap_or_else(|| panic!("app_overrides map must contain the fixture entry: {b}"));
 
     assert_eq!(
         entry.get("app_clip_bundle_id").and_then(Value::as_str),
-        Some(FIXTURE_APP_CLIP_BUNDLE_ID),
+        Some(common::FIXTURE_APP_CLIP_BUNDLE_ID),
         "fixture entry must carry the configured app_clip_bundle_id: {b}"
     );
     assert_eq!(
         entry.get("verify_url").and_then(Value::as_str),
-        Some(FIXTURE_VERIFY_URL),
+        Some(common::FIXTURE_VERIFY_URL),
         "fixture entry must carry the configured verify_url: {b}"
     );
 }
 
-#[test]
-fn test_request_id_still_present_alongside_overrides() {
+#[tokio::test]
+async fn test_request_id_still_present_alongside_overrides() {
     // The override map is additive — the core request_id contract is unchanged,
     // so an SDK that ignores app_overrides still works exactly as before.
-    let base_url = get_base_url();
+    let app = common::test_app().await;
     let body = json!({"iv": "x", "payload": "y", "supports_app_overrides": true});
 
-    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    let (s, b) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 200, "POST /request should succeed: {b}");
 
     let v: Value = serde_json::from_str(&b).unwrap();
@@ -501,12 +406,12 @@ fn test_request_id_still_present_alongside_overrides() {
     );
 }
 
-#[test]
-fn test_response_omits_overrides_without_opt_in() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_response_omits_overrides_without_opt_in() {
+    let app = common::test_app().await;
     let body = json!({"iv": "x", "payload": "y"});
 
-    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    let (s, b) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 200, "POST /request should succeed: {b}");
 
     let v: Value = serde_json::from_str(&b).unwrap();
@@ -520,12 +425,12 @@ fn test_response_omits_overrides_without_opt_in() {
     );
 }
 
-#[test]
-fn test_create_request_without_id_still_generates_uuid() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_create_request_without_id_still_generates_uuid() {
+    let app = common::test_app().await;
     let body = json!({"iv": "no-id-iv", "payload": "no-id-payload"});
 
-    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    let (s, b) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 200);
     let v: Value = serde_json::from_str(&b).unwrap();
     let id = v["request_id"].as_str().expect("request_id");
@@ -534,62 +439,62 @@ fn test_create_request_without_id_still_generates_uuid() {
     assert_eq!(id.matches('-').count(), 4);
 }
 
-#[test]
-fn test_create_request_rejects_invalid_request_id_chars() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_create_request_rejects_invalid_request_id_chars() {
+    let app = common::test_app().await;
     let body = json!({
         "request_id": "has spaces and / slashes",
         "iv": "x",
         "payload": "y",
     });
-    let (s, _) = http_post(&format!("{base_url}/request"), &body);
+    let (s, _) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 400, "invalid request_id chars must 400");
 }
 
-#[test]
-fn test_create_request_rejects_too_long_request_id() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_create_request_rejects_too_long_request_id() {
+    let app = common::test_app().await;
     let body = json!({
         "request_id": "a".repeat(257),
         "iv": "x",
         "payload": "y",
     });
-    let (s, _) = http_post(&format!("{base_url}/request"), &body);
+    let (s, _) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 400, "request_id over 256 chars must 400");
 }
 
-#[test]
-fn test_create_request_rejects_too_short_request_id() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_create_request_rejects_too_short_request_id() {
+    let app = common::test_app().await;
     let body = json!({
         "request_id": "shortid",
         "iv": "x",
         "payload": "y",
     });
-    let (s, _) = http_post(&format!("{base_url}/request"), &body);
+    let (s, _) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 400, "request_id under 16 chars must 400");
 }
 
-#[test]
-fn test_create_request_rejects_colon_in_request_id() {
+#[tokio::test]
+async fn test_create_request_rejects_colon_in_request_id() {
     // Colon is excluded from the charset — `status:foo` would round-trip into
     // the Redis key `req:status:foo`, colliding with the bridge's own status
     // namespace. Excluding `:` prevents the overlap by construction.
-    let base_url = get_base_url();
+    let app = common::test_app().await;
     let body = json!({
         "request_id": "status:colliding-id-here",
         "iv": "x",
         "payload": "y",
     });
-    let (s, _) = http_post(&format!("{base_url}/request"), &body);
+    let (s, _) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 400, "request_id containing `:` must 400");
 }
 
-#[test]
-fn test_get_request_malformed_path_returns_400() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_get_request_malformed_path_returns_400() {
+    let app = common::test_app().await;
     // 3-char path param fails the min-length check.
-    let (s, _) = http_get(&format!("{base_url}/request/abc"));
+    let (s, _) = common::get(&app, "/request/abc").await;
     assert_eq!(s, 400, "GET /request/<too-short> must 400, not 404");
 }
 
@@ -600,14 +505,14 @@ fn test_get_request_malformed_path_returns_400() {
 
 /// Supplying an uppercase `request_id` on POST /request — the response echoes
 /// it back as lowercase and the key is stored lowercase.
-#[test]
-fn test_create_request_uppercase_id_is_normalized() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_create_request_uppercase_id_is_normalized() {
+    let app = common::test_app().await;
     let id_lower = fresh_id();
     let id_upper = id_lower.to_uppercase();
 
     let body = json!({"request_id": id_upper, "iv": "iv-upper", "payload": "payload-upper"});
-    let (s, b) = http_post(&format!("{base_url}/request"), &body);
+    let (s, b) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 200, "POST with uppercase request_id should succeed: {b}");
 
     let v: Value = serde_json::from_str(&b).unwrap();
@@ -617,7 +522,7 @@ fn test_create_request_uppercase_id_is_normalized() {
     );
 
     // Retrieve using the lowercase id — must find the stored payload.
-    let (gs, gb) = http_get(&format!("{base_url}/request/{id_lower}"));
+    let (gs, gb) = common::get(&app, &format!("/request/{id_lower}")).await;
     assert_eq!(gs, 200, "GET with lowercase id must find the payload");
     let gv: Value = serde_json::from_str(&gb).unwrap();
     assert_eq!(gv["iv"], "iv-upper");
@@ -625,19 +530,19 @@ fn test_create_request_uppercase_id_is_normalized() {
 
 /// GET /request/:id with an uppercase path param finds the key stored by its
 /// lowercase equivalent (normalization happens at the path layer too).
-#[test]
-fn test_get_request_uppercase_path_param_is_normalized() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_get_request_uppercase_path_param_is_normalized() {
+    let app = common::test_app().await;
     let id_lower = fresh_id();
 
     // Store using lowercase id.
     let body = json!({"request_id": id_lower, "iv": "iv-path", "payload": "payload-path"});
-    let (s, _) = http_post(&format!("{base_url}/request"), &body);
+    let (s, _) = common::post(&app, "/request", &body).await;
     assert_eq!(s, 200);
 
     // Retrieve using uppercase path param — must hit the same key.
     let id_upper = id_lower.to_uppercase();
-    let (gs, gb) = http_get(&format!("{base_url}/request/{id_upper}"));
+    let (gs, gb) = common::get(&app, &format!("/request/{id_upper}")).await;
     assert_eq!(
         gs, 200,
         "GET with uppercase path param must find the payload"
@@ -649,28 +554,28 @@ fn test_get_request_uppercase_path_param_is_normalized() {
 
 /// Full round-trip: POST with uppercase id, PUT response via uppercase path,
 /// GET response via lowercase path — all resolve to the same key.
-#[test]
-fn test_case_insensitive_full_round_trip() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_case_insensitive_full_round_trip() {
+    let app = common::test_app().await;
     let id_lower = fresh_id();
     let id_upper = id_lower.to_uppercase();
 
     // Create request with uppercase id.
     let req_body = json!({"request_id": id_upper, "iv": "rt-iv", "payload": "rt-payload"});
-    let (s, _) = http_post(&format!("{base_url}/request"), &req_body);
+    let (s, _) = common::post(&app, "/request", &req_body).await;
     assert_eq!(s, 200);
 
     // Consume the request (GET) with mixed path — verifies normalization at GET.
-    let (gs, _) = http_get(&format!("{base_url}/request/{id_upper}"));
+    let (gs, _) = common::get(&app, &format!("/request/{id_upper}")).await;
     assert_eq!(gs, 200);
 
     // PUT response using uppercase path param.
     let res_body = json!({"iv": "rt-resp-iv", "payload": "rt-resp-payload"});
-    let (ps, _) = http_put(&format!("{base_url}/response/{id_upper}"), &res_body);
+    let (ps, _) = common::put(&app, &format!("/response/{id_upper}"), &res_body).await;
     assert_eq!(ps, 201, "PUT /response with uppercase id must succeed");
 
     // GET response using lowercase path param.
-    let (rgs, rgb) = http_get(&format!("{base_url}/response/{id_lower}"));
+    let (rgs, rgb) = common::get(&app, &format!("/response/{id_lower}")).await;
     assert_eq!(
         rgs, 200,
         "GET /response with lowercase id must find the response"
@@ -681,11 +586,10 @@ fn test_case_insensitive_full_round_trip() {
 }
 
 /// Test OpenAPI documentation endpoint exists
-#[test]
-fn test_openapi_endpoint() {
-    let base_url = get_base_url();
-    let url = format!("{}/openapi.json", base_url);
-    let (status_code, body) = http_get(&url);
+#[tokio::test]
+async fn test_openapi_endpoint() {
+    let app = common::test_app().await;
+    let (status_code, body) = common::get(&app, "/openapi.json").await;
 
     assert_eq!(status_code, 200);
 
@@ -694,13 +598,12 @@ fn test_openapi_endpoint() {
 }
 
 // ---------------------------------------------------------------------------
-// WDP85 tracing metadata. This data lives in a separate, expiring Redis record.
-// GET /request exposes the flow ID only when the caller explicitly opts in.
+// WDP85 tracing IDs live in separate, expiring Redis entries.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_flow_metadata_lifecycle_timestamps_ttls_and_cleanup() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_flow_id_lifecycle_uses_fixed_ttl_and_cleans_up() {
+    let app = common::test_app().await;
     let request_id = fresh_id();
     let request = json!({
         "request_id": request_id,
@@ -708,7 +611,7 @@ fn test_flow_metadata_lifecycle_timestamps_ttls_and_cleanup() {
         "payload": "lifecycle-request-payload",
     });
 
-    let (create_status, create_body) = http_post(&format!("{base_url}/request"), &request);
+    let (create_status, create_body) = common::post(&app, "/request", &request).await;
     assert_eq!(create_status, 200, "request creation failed: {create_body}");
     let create_json: Value = serde_json::from_str(&create_body).unwrap();
     assert_eq!(create_json["request_id"], request_id);
@@ -717,20 +620,17 @@ fn test_flow_metadata_lifecycle_timestamps_ttls_and_cleanup() {
         "flow identifiers must not be exposed by POST /request"
     );
 
-    let created_metadata = flow_metadata(&request_id).expect("flow metadata after request create");
-    let flow_id = created_metadata["idkit_flow_id"]
-        .as_str()
-        .expect("idkit_flow_id");
-    Uuid::parse_str(flow_id).expect("idkit_flow_id is a UUID");
-    let request_persisted_at_ms = created_metadata["request_persisted_at_ms"]
-        .as_u64()
-        .expect("request_persisted_at_ms");
-    assert!(request_persisted_at_ms > 0);
-    assert!(created_metadata.get("response_persisted_at_ms").is_none());
-    let created_ttl = redis_ttl(&flow_key(&request_id));
-    assert!((1..=900).contains(&created_ttl));
+    let created_flow = flow_id(&request_id)
+        .await
+        .expect("flow ID after request create");
+    let uuid = created_flow
+        .strip_prefix("idkitflow_")
+        .expect("flow ID prefix");
+    Uuid::parse_str(uuid).expect("flow ID suffix is a UUID");
+    let created_ttl = redis_ttl(&flow_key(&request_id)).await;
+    assert!((901..=1800).contains(&created_ttl));
 
-    let (request_status, request_body) = http_get(&format!("{base_url}/request/{request_id}"));
+    let (request_status, request_body) = common::get(&app, &format!("/request/{request_id}")).await;
     assert_eq!(
         request_status, 200,
         "request consumption failed: {request_body}"
@@ -744,33 +644,35 @@ fn test_flow_metadata_lifecycle_timestamps_ttls_and_cleanup() {
         }),
         "GET /request response schema must stay unchanged"
     );
+    assert_eq!(
+        flow_id(&request_id).await.as_deref(),
+        Some(created_flow.as_str())
+    );
+    let request_ttl = redis_ttl(&flow_key(&request_id)).await;
     assert!(
-        flow_metadata(&request_id).is_some(),
-        "request consumption refreshes metadata for the response leg"
+        request_ttl <= created_ttl,
+        "request consumption must not refresh the fixed flow TTL"
     );
 
     let response = json!({
         "iv": "lifecycle-response-iv",
         "payload": "lifecycle-response-payload",
     });
-    let (put_status, put_body) = http_put(&format!("{base_url}/response/{request_id}"), &response);
+    let (put_status, put_body) =
+        common::put(&app, &format!("/response/{request_id}"), &response).await;
     assert_eq!(put_status, 201, "response creation failed: {put_body}");
 
-    let response_metadata =
-        flow_metadata(&request_id).expect("flow metadata after response create");
-    assert_eq!(response_metadata["idkit_flow_id"], flow_id);
     assert_eq!(
-        response_metadata["request_persisted_at_ms"],
-        request_persisted_at_ms
+        flow_id(&request_id).await.as_deref(),
+        Some(created_flow.as_str())
     );
-    let response_persisted_at_ms = response_metadata["response_persisted_at_ms"]
-        .as_u64()
-        .expect("response_persisted_at_ms");
-    assert!(response_persisted_at_ms >= request_persisted_at_ms);
-    let response_ttl = redis_ttl(&flow_key(&request_id));
-    assert!((1..=900).contains(&response_ttl));
+    let response_ttl = redis_ttl(&flow_key(&request_id)).await;
+    assert!(
+        response_ttl <= request_ttl,
+        "response creation must not refresh the fixed flow TTL"
+    );
 
-    let (get_status, get_body) = http_get(&format!("{base_url}/response/{request_id}"));
+    let (get_status, get_body) = common::get(&app, &format!("/response/{request_id}")).await;
     assert_eq!(get_status, 200, "response consumption failed: {get_body}");
     let get_json: Value = serde_json::from_str(&get_body).unwrap();
     assert_eq!(get_json["status"], "completed");
@@ -780,15 +682,15 @@ fn test_flow_metadata_lifecycle_timestamps_ttls_and_cleanup() {
         "GET /response must not expose flow identifiers"
     );
     assert!(
-        flow_metadata(&request_id).is_none(),
-        "flow metadata is deleted after response consumption"
+        flow_id(&request_id).await.is_none(),
+        "flow ID is deleted after response consumption"
     );
-    assert_eq!(redis_ttl(&format!("req:status:{request_id}")), -2);
+    assert_eq!(redis_ttl(&format!("req:status:{request_id}")).await, -2);
 }
 
-#[test]
-fn test_flow_ids_are_unique_and_never_replace_request_ids() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_flow_ids_are_unique_and_never_replace_request_ids() {
+    let app = common::test_app().await;
     let first_id = fresh_id();
     let second_id = fresh_id();
 
@@ -798,107 +700,83 @@ fn test_flow_ids_are_unique_and_never_replace_request_ids() {
             "iv": "unique-iv",
             "payload": "unique-payload",
         });
-        let (status, response) = http_post(&format!("{base_url}/request"), &body);
+        let (status, response) = common::post(&app, "/request", &body).await;
         assert_eq!(status, 200);
         let response: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["request_id"], request_id.as_str());
         assert!(response.get("idkit_flow_id").is_none());
     }
 
-    let first_flow = flow_metadata(&first_id).unwrap();
-    let second_flow = flow_metadata(&second_id).unwrap();
-    assert_ne!(first_flow["idkit_flow_id"], second_flow["idkit_flow_id"]);
-    assert_ne!(first_flow["idkit_flow_id"], first_id);
-    assert_ne!(second_flow["idkit_flow_id"], second_id);
+    let first_flow = flow_id(&first_id).await.unwrap();
+    let second_flow = flow_id(&second_id).await.unwrap();
+    assert_ne!(first_flow, second_flow);
+    assert_ne!(first_flow, first_id);
+    assert_ne!(second_flow, second_id);
 }
 
-#[test]
-fn test_get_request_returns_idkit_flow_id_only_when_requested() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_response_polling_preserves_flow_id() {
+    let app = common::test_app().await;
     let request_id = fresh_id();
     let request = json!({
         "request_id": request_id,
-        "iv": "flow-id-header-iv",
-        "payload": "flow-id-header-payload",
+        "iv": "polling-flow-iv",
+        "payload": "polling-flow-payload",
     });
 
-    let (create_status, create_body) = http_post(&format!("{base_url}/request"), &request);
+    let (create_status, create_body) = common::post(&app, "/request", &request).await;
     assert_eq!(create_status, 200, "request creation failed: {create_body}");
+    let expected_flow = flow_id(&request_id).await.expect("flow ID after create");
 
-    let flow = flow_metadata(&request_id).expect("flow metadata after request create");
-    let expected_flow_id = flow["idkit_flow_id"].as_str().expect("idkit_flow_id");
-
-    let (get_status, get_body) = http_get_with_headers(
-        &format!("{base_url}/request/{request_id}"),
-        &["Accept-IDKit-Flow-ID: true"],
+    let (poll_status, poll_body) = common::get(&app, &format!("/response/{request_id}")).await;
+    assert_eq!(poll_status, 200, "response polling failed: {poll_body}");
+    assert_eq!(
+        flow_id(&request_id).await.as_deref(),
+        Some(expected_flow.as_str()),
+        "polling without a response must not consume the flow ID"
     );
-    assert_eq!(get_status, 200, "request consumption failed: {get_body}");
-
-    let response: Value = serde_json::from_str(&get_body).unwrap();
-    assert_eq!(response["iv"], "flow-id-header-iv");
-    assert_eq!(response["payload"], "flow-id-header-payload");
-    assert_eq!(response["idkit_flow_id"], expected_flow_id);
 }
 
-#[test]
-fn test_concurrent_consumers_keep_request_and_response_one_time() {
+#[tokio::test]
+async fn test_concurrent_response_consumers_keep_response_one_time() {
     const CONSUMERS: usize = 8;
 
-    let base_url = get_base_url();
+    let app = common::test_app().await;
     let request_id = fresh_id();
     let request = json!({
         "request_id": request_id,
         "iv": "concurrent-request-iv",
         "payload": "concurrent-request-payload",
     });
-    let (status, body) = http_post(&format!("{base_url}/request"), &request);
+    let (status, body) = common::post(&app, "/request", &request).await;
     assert_eq!(status, 200, "request creation failed: {body}");
-
-    let request_url = format!("{base_url}/request/{request_id}");
-    let barrier = Arc::new(Barrier::new(CONSUMERS));
-    let consumers: Vec<_> = (0..CONSUMERS)
-        .map(|_| {
-            let barrier = Arc::clone(&barrier);
-            let request_url = request_url.clone();
-            thread::spawn(move || {
-                barrier.wait();
-                http_get(&request_url).0
-            })
-        })
-        .collect();
-    let statuses: Vec<_> = consumers
-        .into_iter()
-        .map(|consumer| consumer.join().unwrap())
-        .collect();
-    assert_eq!(statuses.iter().filter(|&&status| status == 200).count(), 1);
-    assert_eq!(
-        statuses.iter().filter(|&&status| status == 404).count(),
-        CONSUMERS - 1
-    );
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
 
     let response = json!({
         "iv": "concurrent-response-iv",
         "payload": "concurrent-response-payload",
     });
-    let (status, body) = http_put(&format!("{base_url}/response/{request_id}"), &response);
+    let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
     assert_eq!(status, 201, "response creation failed: {body}");
 
-    let response_url = format!("{base_url}/response/{request_id}");
+    let response_url = format!("/response/{request_id}");
     let barrier = Arc::new(Barrier::new(CONSUMERS));
-    let consumers: Vec<_> = (0..CONSUMERS)
-        .map(|_| {
-            let barrier = Arc::clone(&barrier);
-            let response_url = response_url.clone();
-            thread::spawn(move || {
-                barrier.wait();
-                http_get(&response_url).0
-            })
-        })
-        .collect();
-    let statuses: Vec<_> = consumers
-        .into_iter()
-        .map(|consumer| consumer.join().unwrap())
-        .collect();
+    let mut consumers = Vec::with_capacity(CONSUMERS);
+    for _ in 0..CONSUMERS {
+        let app = app.clone();
+        let barrier = Arc::clone(&barrier);
+        let response_url = response_url.clone();
+        consumers.push(tokio::spawn(async move {
+            barrier.wait().await;
+            common::get(&app, &response_url).await.0
+        }));
+    }
+
+    let mut statuses = Vec::with_capacity(CONSUMERS);
+    for consumer in consumers {
+        statuses.push(consumer.await.unwrap());
+    }
     assert_eq!(statuses.iter().filter(|&&status| status == 200).count(), 1);
     assert_eq!(
         statuses.iter().filter(|&&status| status == 404).count(),
@@ -906,92 +784,96 @@ fn test_concurrent_consumers_keep_request_and_response_one_time() {
     );
 }
 
-#[test]
-fn test_legacy_missing_flow_metadata_does_not_break_round_trip() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_legacy_missing_flow_id_does_not_break_round_trip() {
+    let app = common::test_app().await;
     let request_id = fresh_id();
     let request = json!({
         "request_id": request_id,
         "iv": "legacy-request-iv",
         "payload": "legacy-request-payload",
     });
-    let (status, body) = http_post(&format!("{base_url}/request"), &request);
+    let (status, body) = common::post(&app, "/request", &request).await;
     assert_eq!(status, 200, "request creation failed: {body}");
 
-    let deleted: usize = redis_connection()
+    let deleted: usize = common::redis_connection()
+        .await
         .del(flow_key(&request_id))
-        .expect("delete flow metadata");
+        .await
+        .expect("delete flow ID");
     assert_eq!(deleted, 1);
 
-    let (status, body) = http_get(&format!("{base_url}/request/{request_id}"));
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
     assert_eq!(status, 200, "legacy request consumption failed: {body}");
 
     let response = json!({
         "iv": "legacy-response-iv",
         "payload": "legacy-response-payload",
     });
-    let (status, body) = http_put(&format!("{base_url}/response/{request_id}"), &response);
+    let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
     assert_eq!(status, 201, "legacy response creation failed: {body}");
 
-    let (status, body) = http_get(&format!("{base_url}/response/{request_id}"));
+    let (status, body) = common::get(&app, &format!("/response/{request_id}")).await;
     assert_eq!(status, 200, "legacy response consumption failed: {body}");
     let body: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(body["response"], response);
 }
 
-#[test]
-fn test_malformed_flow_metadata_is_best_effort() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_malformed_flow_id_is_best_effort() {
+    let app = common::test_app().await;
     let request_id = fresh_id();
     let request = json!({
         "request_id": request_id,
         "iv": "malformed-request-iv",
         "payload": "malformed-request-payload",
     });
-    let (status, body) = http_post(&format!("{base_url}/request"), &request);
+    let (status, body) = common::post(&app, "/request", &request).await;
     assert_eq!(status, 200, "request creation failed: {body}");
 
-    redis_connection()
-        .set_ex::<_, _, ()>(flow_key(&request_id), b"not-json", 900)
-        .expect("inject malformed flow metadata");
+    common::redis_connection()
+        .await
+        .set_ex::<_, _, ()>(flow_key(&request_id), b"not-a-flow-id", 1800)
+        .await
+        .expect("inject malformed flow ID");
 
-    let (status, body) = http_get(&format!("{base_url}/request/{request_id}"));
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
     assert_eq!(
         status, 200,
-        "metadata parse failure must not break request consumption: {body}"
+        "flow ID parse failure must not break request consumption: {body}"
     );
 
     let response = json!({
         "iv": "malformed-response-iv",
         "payload": "malformed-response-payload",
     });
-    let (status, body) = http_put(&format!("{base_url}/response/{request_id}"), &response);
+    let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
     assert_eq!(
         status, 201,
-        "metadata parse failure must not break response creation: {body}"
+        "flow ID parse failure must not break response creation: {body}"
     );
 
-    let (status, body) = http_get(&format!("{base_url}/response/{request_id}"));
+    let (status, body) = common::get(&app, &format!("/response/{request_id}")).await;
     assert_eq!(
         status, 200,
-        "metadata parse failure must not break response consumption: {body}"
+        "flow ID parse failure must not break response consumption: {body}"
     );
-    assert!(flow_metadata(&request_id).is_none());
+    assert!(flow_id(&request_id).await.is_none());
 }
 
-#[test]
-fn test_standalone_response_does_not_create_idkit_flow_metadata() {
-    let base_url = get_base_url();
+#[tokio::test]
+async fn test_standalone_response_does_not_create_idkit_flow_id() {
+    let app = common::test_app().await;
     let response = json!({
         "iv": "standalone-untraced-iv",
         "payload": "standalone-untraced-payload",
     });
-    let (status, body) = http_post(&format!("{base_url}/response"), &response);
+    let (status, body) = common::post(&app, "/response", &response).await;
     assert_eq!(status, 201, "standalone response creation failed: {body}");
     let body: Value = serde_json::from_str(&body).unwrap();
     let request_id = body["request_id"].as_str().unwrap();
     assert!(
-        flow_metadata(request_id).is_none(),
+        flow_id(request_id).await.is_none(),
         "standalone response flows stay outside WDP85 tracing"
     );
 }

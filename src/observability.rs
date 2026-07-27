@@ -1,257 +1,157 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+//! Correlation helpers for tracing a message across bridge handoffs.
+//!
+//! Flow identifiers deliberately carry no timing or client data. They only
+//! connect bounded bridge spans and expire after a fixed correlation window.
+
+use std::fmt;
 
 use redis::{aio::ConnectionManager, AsyncCommands};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{field, Span};
 use uuid::Uuid;
 
 use crate::utils::EXPIRE_AFTER_SECONDS;
 
+/// Redis namespace used to carry a flow identifier to the response leg.
 pub const FLOW_PREFIX: &str = "flow:";
 
-const HANDOFF_DURATION_METRIC: &str = "wallet_bridge.handoff.duration_ms";
+const IDKIT_FLOW_ID_PREFIX: &str = "idkitflow_";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IDKitFlowMetadata {
-    pub idkit_flow_id: Uuid,
-    pub request_persisted_at_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_persisted_at_ms: Option<u64>,
-}
+/// Flow correlation can span one full request TTL before consumption and one
+/// full response TTL afterward. Allocate both 15-minute legs up front so
+/// expiry stays deterministic and GET does not refresh observability state.
+///
+/// This 30-minute lifetime is an intentional exception to the bridge's usual
+/// uniform TTL: payloads still expire after `EXPIRE_AFTER_SECONDS`.
+const FLOW_EXPIRE_AFTER_SECONDS: u64 = EXPIRE_AFTER_SECONDS * 2;
 
-#[derive(Debug)]
-enum FlowMetadataSnapshot {
-    Present(IDKitFlowMetadata),
-    Missing,
-    Invalid,
-}
+/// Opaque correlation identifier shared by the spans in one `IDKit` flow.
+///
+/// The textual prefix distinguishes this value from request IDs and other
+/// UUID-shaped identifiers without attaching any client-specific meaning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct IdkitFlowId(String);
 
-impl FlowMetadataSnapshot {
-    fn from_redis(value: Option<&str>) -> Self {
-        value.map_or(Self::Missing, |value| {
-            serde_json::from_str(value)
-                .map(Self::Present)
-                .unwrap_or(Self::Invalid)
-        })
+impl IdkitFlowId {
+    /// Generate a new prefixed correlation identifier.
+    fn new() -> Self {
+        Self(format!("{IDKIT_FLOW_ID_PREFIX}{}", Uuid::new_v4()))
+    }
+
+    /// Return the serialized representation stored in Redis and JSON.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn from_redis(value: &str) -> Option<Self> {
+        let uuid = value.strip_prefix(IDKIT_FLOW_ID_PREFIX)?;
+        Uuid::parse_str(uuid).ok()?;
+        Some(Self(value.to_string()))
     }
 }
 
-fn now_ms() -> Option<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| duration.as_millis().try_into().ok())
+impl fmt::Display for IdkitFlowId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
-const fn queue_age_ms(persisted_at_ms: u64, observed_at_ms: u64) -> Option<u64> {
-    observed_at_ms.checked_sub(persisted_at_ms)
-}
-
+/// Build the Redis key used to carry a flow identifier between route legs.
+#[must_use]
 pub fn flow_key(request_id: &str) -> String {
     format!("{FLOW_PREFIX}{request_id}")
 }
 
-async fn persist_flow_metadata(
-    redis: &mut ConnectionManager,
-    request_id: &str,
-    metadata: &IDKitFlowMetadata,
-) -> Result<(), &'static str> {
-    let value = serde_json::to_string(metadata).map_err(|_| "metadata_serialize_failed")?;
-
-    redis
-        .set_ex::<_, _, ()>(flow_key(request_id), value, EXPIRE_AFTER_SECONDS)
-        .await
-        .map_err(|_| "metadata_write_failed")
-}
-
+/// Mint and persist a flow identifier for a newly created request.
+///
+/// # Errors
+///
+/// Returns `flow_id_write_failed` when Redis cannot store the identifier.
 pub async fn mint_and_store_idkit_flow_id(
     redis: &mut ConnectionManager,
     request_id: &str,
-) -> Result<Uuid, &'static str> {
-    let idkit_flow_id = Uuid::new_v4();
-    Span::current().record("idkit_flow_id", field::display(idkit_flow_id));
+) -> Result<IdkitFlowId, &'static str> {
+    let idkit_flow_id = IdkitFlowId::new();
+    record_idkit_flow_id(&idkit_flow_id);
 
-    let request_persisted_at_ms = now_ms().ok_or("clock_unavailable")?;
-    let metadata = IDKitFlowMetadata {
-        idkit_flow_id,
-        request_persisted_at_ms,
-        response_persisted_at_ms: None,
-    };
-
-    persist_flow_metadata(redis, request_id, &metadata).await?;
+    redis
+        .set_ex::<_, _, ()>(
+            flow_key(request_id),
+            idkit_flow_id.as_str(),
+            FLOW_EXPIRE_AFTER_SECONDS,
+        )
+        .await
+        .map_err(|_| "flow_id_write_failed")?;
 
     Ok(idkit_flow_id)
 }
 
-pub fn record_idkit_flow_id(value: Option<&str>) {
-    if let FlowMetadataSnapshot::Present(metadata) = FlowMetadataSnapshot::from_redis(value) {
-        record_flow(&metadata);
-    }
-}
-
-pub async fn observe_request_handoff(
-    redis: &mut ConnectionManager,
-    request_id: &str,
-    value: Option<&str>,
-) -> Option<Uuid> {
-    let metadata = metadata_or_warn(value, "request_handoff")?;
-    let idkit_flow_id = metadata.idkit_flow_id;
-
-    observe_handoff(&metadata, Some(metadata.request_persisted_at_ms), "request");
-
-    // Refresh the metadata TTL for the response leg. This is intentionally
-    // best effort: observability must never break a successfully consumed
-    // encrypted request.
-    if let Err(outcome) = persist_flow_metadata(redis, request_id, &metadata).await {
+/// Record the flow identifier observed while consuming a request.
+pub fn record_request_handoff(value: Option<&str>) -> Option<IdkitFlowId> {
+    let Some(value) = value else {
         tracing::warn!(
-            outcome,
+            outcome = "flow_id_missing",
             operation = "request_handoff",
-            "Failed to persist IDKit flow metadata"
+            "Failed to observe IDKit flow ID"
         );
-    }
+        return None;
+    };
+    let Some(idkit_flow_id) = IdkitFlowId::from_redis(value) else {
+        tracing::warn!(
+            outcome = "flow_id_invalid",
+            operation = "request_handoff",
+            "Failed to observe IDKit flow ID"
+        );
+        return None;
+    };
+    record_idkit_flow_id(&idkit_flow_id);
 
     Some(idkit_flow_id)
 }
 
-pub fn observe_response_handoff(value: Option<&str>) {
-    let Some(metadata) = metadata_or_warn(value, "response_handoff") else {
+/// Record a response-side flow identifier when one exists.
+///
+/// Missing identifiers are expected for standalone and legacy response flows.
+/// Malformed identifiers are reported but never block payload delivery.
+pub fn record_response_handoff(value: Option<&str>) {
+    let Some(value) = value else {
         return;
     };
-
-    observe_handoff(&metadata, metadata.response_persisted_at_ms, "response");
-}
-
-pub async fn record_response_persisted(
-    redis: &mut ConnectionManager,
-    request_id: &str,
-    value: Option<&str>,
-) {
-    let Some(mut metadata) = metadata_or_warn(value, "response_persisted") else {
-        return;
-    };
-    record_flow(&metadata);
-
-    let Some(response_persisted_at_ms) = now_ms() else {
+    let Some(idkit_flow_id) = IdkitFlowId::from_redis(value) else {
         tracing::warn!(
-            outcome = "clock_unavailable",
-            operation = "response_persisted",
-            "Failed to persist IDKit flow metadata"
+            outcome = "flow_id_invalid",
+            operation = "response_handoff",
+            "Failed to observe IDKit flow ID"
         );
         return;
     };
-
-    metadata.response_persisted_at_ms = Some(response_persisted_at_ms);
-    if let Err(outcome) = persist_flow_metadata(redis, request_id, &metadata).await {
-        tracing::warn!(
-            outcome,
-            operation = "response_persisted",
-            "Failed to persist IDKit flow metadata"
-        );
-    }
+    record_idkit_flow_id(&idkit_flow_id);
 }
 
-fn metadata_or_warn(value: Option<&str>, operation: &'static str) -> Option<IDKitFlowMetadata> {
-    match FlowMetadataSnapshot::from_redis(value) {
-        FlowMetadataSnapshot::Present(metadata) => Some(metadata),
-        FlowMetadataSnapshot::Missing => {
-            tracing::warn!(
-                outcome = "metadata_missing",
-                operation,
-                "Failed to observe IDKit flow metadata"
-            );
-            None
-        }
-        FlowMetadataSnapshot::Invalid => {
-            tracing::warn!(
-                outcome = "metadata_invalid",
-                operation,
-                "Failed to observe IDKit flow metadata"
-            );
-            None
-        }
-    }
-}
-
-fn observe_handoff(metadata: &IDKitFlowMetadata, persisted_at_ms: Option<u64>, leg: &'static str) {
-    record_flow(metadata);
-
-    let age_ms = persisted_at_ms
-        .and_then(|persisted_at_ms| now_ms().and_then(|now| queue_age_ms(persisted_at_ms, now)));
-    let Some(age_ms) = age_ms else {
-        tracing::warn!(
-            outcome = "clock_unavailable_or_skewed",
-            operation = leg,
-            "Failed to observe IDKit flow metadata"
-        );
-        return;
-    };
-
-    record_queue_age(age_ms);
-    record_handoff_duration(leg, age_ms);
-}
-
-fn record_flow(metadata: &IDKitFlowMetadata) {
-    Span::current().record("idkit_flow_id", field::display(metadata.idkit_flow_id));
-}
-
-fn record_queue_age(age_ms: u64) {
-    Span::current().record("queue_age_ms", age_ms);
-}
-
-fn record_handoff_duration(leg: &'static str, duration_ms: u64) {
-    let duration_ms = u32::try_from(duration_ms).unwrap_or(u32::MAX);
-    telemetry_batteries::reexports::metrics::histogram!(
-        HANDOFF_DURATION_METRIC,
-        "leg" => leg
-    )
-    .record(duration_ms);
+fn record_idkit_flow_id(idkit_flow_id: &IdkitFlowId) {
+    Span::current().record("idkit_flow_id", field::display(idkit_flow_id));
 }
 
 #[cfg(test)]
 mod tests {
-    use metrics_util::debugging::DebuggingRecorder;
-
     use super::*;
 
     #[test]
-    fn queue_age_uses_checked_subtraction() {
-        assert_eq!(queue_age_ms(100, 140), Some(40));
-        assert_eq!(queue_age_ms(140, 100), None);
-    }
+    fn idkit_flow_id_has_a_recognizable_prefix_and_uuid_suffix() {
+        let flow_id = IdkitFlowId::new();
+        let uuid = flow_id
+            .as_str()
+            .strip_prefix(IDKIT_FLOW_ID_PREFIX)
+            .expect("flow ID should use the IDKit prefix");
 
-    #[test]
-    fn idkit_flow_metadata_is_backward_compatible_with_missing_response_timestamp() {
-        let flow_id = Uuid::new_v4();
-        let raw = format!(r#"{{"idkit_flow_id":"{flow_id}","request_persisted_at_ms":123}}"#);
-        let metadata: IDKitFlowMetadata = serde_json::from_str(&raw).unwrap();
-
-        assert_eq!(metadata.idkit_flow_id, flow_id);
-        assert_eq!(metadata.request_persisted_at_ms, 123);
-        assert_eq!(metadata.response_persisted_at_ms, None);
-    }
-
-    #[test]
-    fn handoff_duration_uses_only_the_bounded_leg_tag() {
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        telemetry_batteries::reexports::metrics::with_local_recorder(&recorder, || {
-            record_handoff_duration("request", 42);
-        });
-
-        let snapshot = snapshotter.snapshot();
-        let metrics = snapshot.into_vec();
-        assert_eq!(metrics.len(), 1);
-
-        for (composite_key, _, _, _) in metrics {
-            let key = composite_key.key();
-            let labels: Vec<_> = key
-                .labels()
-                .map(|label| (label.key(), label.value()))
-                .collect();
-
-            assert_eq!(key.name(), HANDOFF_DURATION_METRIC);
-            assert_eq!(labels, vec![("leg", "request")]);
-        }
+        assert!(Uuid::parse_str(uuid).is_ok());
+        assert_eq!(
+            IdkitFlowId::from_redis(flow_id.as_str()),
+            Some(flow_id.clone())
+        );
+        assert!(IdkitFlowId::from_redis("not-a-flow-id").is_none());
     }
 }
