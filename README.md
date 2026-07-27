@@ -26,10 +26,16 @@ IDKit ->> Bridge: Poll for updates GET /response/:id
 Bridge ->> IDKit: <response>
 ```
 
+### Endpoints
+
 - `POST /request`: Called by IDKit. Initializes a proof verification request.
 - `GET /request/:id`: Called by Authenticator. Used to fetch the proof verification request. One time use.
+- `HEAD /request/:id`: Existence check for a request. `200` if present, `404` otherwise.
 - `PUT /response/:id`: Called by Authenticator. Used to send the proof back to the application.
 - `GET /response/:id`: Called by IDKit. Continuous pulling to fetch the status of the request and the response if available. Response can only be retrieved once.
+- `HEAD /response/:id`: Existence check for a request's status. `200` if present, `404` otherwise.
+- `POST /response`: Called by a client to create a standalone response without a prior request (see [Standalone Response Flow](#standalone-response-flow)).
+- `PUT /request/:id`: Staging only (`ENVIRONMENT == "staging"`). Idempotent request upsert.
 
 ### Standalone Response Flow
 
@@ -59,9 +65,9 @@ When building the Dockerfile locally remember to specify the `--platform=linux/a
 
 ## Testing
 
-Integration tests use Redis (dockerized in `docker-compose.test.yml`), which can be run with:
+Integration tests build the bridge in-process and drive it directly, so the only external dependency is Redis (override its location with `REDIS_URL`):
 
 ```bash
-docker-compose -f docker-compose.test.yml up
+docker-compose -f docker-compose.test.yml up -d
 cargo test
 ```
