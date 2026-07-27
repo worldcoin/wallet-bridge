@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Unless we are on the main branch, the workflow should stop and yield to a new run if new code is pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'main' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -123,9 +128,6 @@ jobs:
 
     env:
       REDIS_URL: redis://localhost:6379
-      # Fixture consumed by the app-override integration tests. Must match the
-      # FIXTURE_* constants in tests/integration_test.rs.
-      APP_URL_OVERRIDES: '{"app_integration_override_fixture":{"app_clip_bundle_id":"org.example.integration.Clip","verify_url":"https://world.org/verify"}}'
 
     steps:
       - name: Checkout code
@@ -136,7 +138,4 @@ jobs:
           toolchain: stable
 
       - name: Run integration tests
-        run: |
-          cargo run > bridge.log 2>&1 &
-          until curl -sf http://localhost:8000/ > /dev/null 2>&1; do sleep 1; done
-          cargo test --test integration_test
+        run: cargo test

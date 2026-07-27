@@ -8,18 +8,20 @@ use serde::{Deserialize, Serialize};
 pub const EXPIRE_AFTER_SECONDS: u64 = 900; // Increasing to allow partner verifications.
 pub const REQ_STATUS_PREFIX: &str = "req:status:";
 
-/// Maximum length of a `request_id`, whether supplied by the client on
-/// `POST /request` or extracted from a route path. Bounds Redis-key memory and
-/// keeps URLs reasonable; 256 is more than enough for UUIDs (36), HKDF-derived
-/// hex (64), and base64-shaped identifiers.
+/// Maximum length of a `request_id`.
+///
+/// Whether supplied by the client on `POST /request` or extracted from a route
+/// path. Bounds Redis-key memory and keeps URLs reasonable; 256 is more than
+/// enough for UUIDs (36), HKDF-derived hex (64), and base64-shaped identifiers.
 pub const REQUEST_ID_MAX_LEN: usize = 256;
 
-/// Minimum length of a `request_id`. Anything shorter is almost certainly a
-/// mistake — UUIDs are 36 chars, UUID-simple is 32, HKDF-derived hex is 64,
-/// and base64url of 12 random bytes is 16. The bound doesn't enforce
-/// cryptographic entropy on its own (a 16-char string of `aaaa…` passes),
-/// but it stops trivial typos and obvious attacks; the RP is responsible
-/// for picking high-entropy identifiers.
+/// Minimum length of a `request_id`.
+///
+/// Anything shorter is almost certainly a mistake — UUIDs are 36 chars,
+/// UUID-simple is 32, HKDF-derived hex is 64, and base64url of 12 random bytes
+/// is 16. The bound doesn't enforce cryptographic entropy on its own (a 16-char
+/// string of `aaaa…` passes), but it stops trivial typos and obvious attacks;
+/// the RP is responsible for picking high-entropy identifiers.
 pub const REQUEST_ID_MIN_LEN: usize = 16;
 
 /// A per-`app_id` override, this is a temporary workaround that enables smooth rollout of our new World ID app.
@@ -49,9 +51,9 @@ pub type AppOverrides = HashMap<String, AppOverride>;
 pub enum RequestStatus {
     /// The request has been initiated by the client
     Initialized,
-    /// The request has been retrieved by World App
+    /// The request has been retrieved
     Retrieved,
-    /// The request has received a response from World App
+    /// The request has received a response
     Completed,
 }
 
@@ -87,6 +89,7 @@ pub struct RequestPayload {
 }
 
 impl RequestPayload {
+    #[must_use]
     pub const fn new(iv: String, payload: String) -> Self {
         Self { iv, payload }
     }
@@ -98,15 +101,21 @@ pub fn handle_redis_error(e: RedisError) -> StatusCode {
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
-/// Validate a `request_id` (path param or client-supplied body field):
-/// length between `REQUEST_ID_MIN_LEN` and `REQUEST_ID_MAX_LEN`, charset
-/// limited to URL-path-safe ASCII (alphanumeric plus `-`, `_`, `.`).
+/// Validate a `request_id` (path param or client-supplied body field).
+///
+/// Length must be between `REQUEST_ID_MIN_LEN` and `REQUEST_ID_MAX_LEN`, and the
+/// charset is limited to URL-path-safe ASCII (alphanumeric plus `-`, `_`, `.`).
 ///
 /// `:` is intentionally excluded from the charset: an ID like `status:foo`
 /// would round-trip into the Redis key `req:status:foo`, colliding with the
 /// status-namespace key `req:status:foo` that the bridge writes for some
 /// other request. Keeping the charset disjoint from the literal `:` prevents
 /// that overlap by construction.
+///
+/// # Errors
+///
+/// Returns [`StatusCode::BAD_REQUEST`] if `id` is outside the length bounds or
+/// contains characters outside the allowed charset.
 pub fn validate_request_id(id: &str) -> Result<(), StatusCode> {
     if id.len() < REQUEST_ID_MIN_LEN || id.len() > REQUEST_ID_MAX_LEN {
         return Err(StatusCode::BAD_REQUEST);

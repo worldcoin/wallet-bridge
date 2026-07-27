@@ -24,6 +24,6 @@ fn main() {
     println!("cargo:rustc-env=STATIC_BUILD_DATE={}", get_compile_date());
 
     if let Some(rev) = get_git_rev() {
-        println!("cargo:rustc-env=GIT_REV={}", rev);
+        println!("cargo:rustc-env=GIT_REV={rev}");
     }
 }

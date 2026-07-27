@@ -1,12 +1,18 @@
-# Wallet Bridge
+# Message Bridge (previously Wallet Bridge)
 
-> **Warning** This project is still in early alpha.
+The message bridge is a **dumb**, environment and client agnostic relay of arbitrary messages. It lets two parties share an arbitrary message where parties can gossip a 
+symmetric key off-band.
 
-An end-to-end encrypted bridge between the World ID SDK and World App. This bridge is used to pass zero-knowledge proofs for World ID verifications.
+The bridge is made so that it cannot eavesdrop on any messages. The bridge expects only ciphertext. **All clients MUST encrypt all payloads before submitting to the bridge.**.
 
-More details in the [docs](https://docs.world.org/world-id/further-reading/protocol-internals).
+- **Importantly** this bridge is completely agnostic to any client or environment, it simply relays messages, hence it implements no logic or opinions related to client handling.
+- All messages received by this bridge are temporarily held for delivery, but are automatically purged after a period of time. This service has and SHOULD NOT have _persisting_ storage.
 
-## Flow
+## Use Case: World ID Protocol
+
+The bridge is currently used in the [World ID Protocol](https://github.com/worldcoin/world-id-protocol). The most used path is for RPs to request proofs from users (to their Authenticators) and for Authenticators to send back proofs.
+
+### Example Flow
 
 ```mermaid
 sequenceDiagram
@@ -20,50 +26,32 @@ IDKit ->> Bridge: Poll for updates GET /response/:id
 Bridge ->> IDKit: <response>
 ```
 
-```mermaid
-flowchart
-A[IDKit posts request /request] --> B[Request is stored in the bridge with status = initialized]
-B --> C[IDKit starts polling /response/:id]
-C --> D[User scans QR code with requestId & decryption key]
-D --> E[App fetches request at /request/:id]
-E --> F[Bridge updates status = retrieved]
-F -- Status updated = retrieved --> C
-F --> G[App generates proof and PUTs to /response/:id]
-G --> H[Bridge stores response. One-time retrieval]
-H -- Response provided --> C
-```
-
-## Endpoints
+### Endpoints
 
 - `POST /request`: Called by IDKit. Initializes a proof verification request.
 - `GET /request/:id`: Called by Authenticator. Used to fetch the proof verification request. One time use.
+- `HEAD /request/:id`: Existence check for a request. `200` if present, `404` otherwise.
 - `PUT /response/:id`: Called by Authenticator. Used to send the proof back to the application.
 - `GET /response/:id`: Called by IDKit. Continuous pulling to fetch the status of the request and the response if available. Response can only be retrieved once.
-- `POST /response`: Called by Authenticator. Creates a standalone response without a prior request.
+- `HEAD /response/:id`: Existence check for a request's status. `200` if present, `404` otherwise.
+- `POST /response`: Called by a client to create a standalone response without a prior request (see [Standalone Response Flow](#standalone-response-flow)).
+- `PUT /request/:id`: Staging only (`ENVIRONMENT == "staging"`). Idempotent request upsert.
 
-### Standalone Response Flow (Authenticator Initiates)
+### Standalone Response Flow
 
-Authenticator App initiates without a prior IDKit request:
+This flow allows a client to send a `/response` without first generating a `/request` first.
 
 ```mermaid
 sequenceDiagram
-    participant Authenticator
+    participant ClientA
     participant Bridge
-    participant IDKit
+    participant ClientB
 
-    Authenticator->>Bridge: POST /response (payload)
-    Bridge->>Authenticator: 201 CREATED {request_id}
-    IDKit->>Bridge: GET /response/:request_id
-    Bridge->>IDKit: 200 OK {response}
+    ClientA->>Bridge: POST /response (payload)
+    Bridge->>ClientA: 201 CREATED {request_id}
+    ClientB->>Bridge: GET /response/:request_id
+    Bridge->>ClientB: 200 OK {response}
 ```
-
-**World App workflow:**
-1. POST /response with encrypted payload
-2. Receive generated request_id
-3. Send request_id to IDKit
-4. IDKit retrieves response using GET /response/:request_id
-
-**TTL:** 15 minutes (900 seconds) - responses expire automatically
 
 ## Local Development
 
@@ -77,91 +65,9 @@ When building the Dockerfile locally remember to specify the `--platform=linux/a
 
 ## Testing
 
-### Integration Testing
-
-A `docker-compose.test.yml` file provides Redis for integration testing, and comprehensive integration tests are available in the `tests/` directory.
-
-#### Running Integration Tests
+Integration tests build the bridge in-process and drive it directly, so the only external dependency is Redis (override its location with `REDIS_URL`):
 
 ```bash
-# Terminal 1: Start Redis
 docker-compose -f docker-compose.test.yml up -d
-
-# Terminal 2: Start the application.
-# APP_URL_OVERRIDES is the fixture the app-override tests assert against; it
-# must match the FIXTURE_* constants in tests/integration_test.rs.
-REDIS_URL=redis://localhost:6379 \
-APP_URL_OVERRIDES='{"app_integration_override_fixture":{"app_clip_bundle_id":"org.example.integration.Clip","verify_url":"https://world.org/verify"}}' \
-cargo run
-
-# Terminal 3: Run the tests
-cargo test --test integration_test
+cargo test
 ```
-
-For more details, see [tests/README.md](tests/README.md).
-
-#### What's Tested
-
-The integration tests cover:
-- Request creation and retrieval (one-time use)
-- Response submission and retrieval
-- Standalone response flow (World App initiated)
-- Pending status handling
-- Error cases (404s, validation)
-- Per-app URL overrides (mapped/unmapped/absent/malformed `app_id`)
-- OpenAPI documentation endpoint
-
-### Manual Integration Testing
-
-#### Test Request Flow
-
-```bash
-# Create a request
-REQUEST_ID=$(curl -s -X POST http://localhost:8000/request \
-  -H "Content-Type: application/json" \
-  -d '{"iv":"test_iv","payload":"test_payload"}' | jq -r '.request_id')
-
-# Verify request exists
-curl -I http://localhost:8000/request/$REQUEST_ID
-
-# Retrieve request (one-time use)
-curl http://localhost:8000/request/$REQUEST_ID
-
-# Verify request was deleted (should return 404)
-curl http://localhost:8000/request/$REQUEST_ID
-```
-
-#### Test Response Flow
-
-```bash
-# Create a request
-REQUEST_ID=$(curl -s -X POST http://localhost:8000/request \
-  -H "Content-Type: application/json" \
-  -d '{"iv":"test","payload":"test"}' | jq -r '.request_id')
-
-# Submit a response
-curl -X PUT http://localhost:8000/response/$REQUEST_ID \
-  -H "Content-Type: application/json" \
-  -d '{"iv":"response","payload":"response"}'
-
-# Retrieve the response
-curl http://localhost:8000/response/$REQUEST_ID
-```
-
-#### Test Standalone Response Flow
-
-```bash
-# Create standalone response (Authenticator initiated)
-RESPONSE_ID=$(curl -s -X POST http://localhost:8000/response \
-  -H "Content-Type: application/json" \
-  -d '{"iv":"standalone","payload":"standalone"}' | jq -r '.request_id')
-
-# Retrieve the response
-curl http://localhost:8000/response/$RESPONSE_ID
-```
-
-Other useful environment variables:
-- `PORT`: Application port (default: 8000)
-- `ENVIRONMENT`: Environment name (development/production)
-- `RUST_LOG`: Logging level (info/debug/trace)
-- `APP_URL_OVERRIDES`: JSON object mapping `app_id → {app_clip_bundle_id?, verify_url?}`. The bridge returns this whole map verbatim as `app_overrides`, but **only to clients that opt in** by sending `"supports_app_overrides": true` on `POST /request` — it takes no `app_id` input and does not inspect which app a request belongs to. Clients that don't opt in (everything shipped before the feature, and any strict JSON parser that rejects unknown keys) get the legacy `{request_id}` response, so a server-side rollout can't break them. The iOS SDK selects its own `app_id` entry client-side to override its built-in App Clip bundle id (the `p` of an `appclip.apple.com/id` default link) and verify base URL. Unset or empty disables the feature for everyone (the field is omitted; the SDK keeps its defaults) — this is the kill switch. Malformed JSON is a fatal startup error.
