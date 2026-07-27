@@ -3,9 +3,10 @@ license = "MIT"
 edition = "2021"
 version = "0.1.0"
 name = "world-id-bridge"
+publish = "false"
 authors = ["Miguel Piedrafita <rust@miguel.build>"]
 repository = "https://github.com/worldcoin/wallet-bridge"
-description = "A bridge between the World ID SDK and the World App"
+description = "A dumb, environment and client agnostic relay of arbitrary messages. It lets two parties share an arbitrary message where parties can gossip a symmetric key off-band"
 
 [dependencies]
 aide = { version = "0.13.2", features = ["axum", "scalar"] }

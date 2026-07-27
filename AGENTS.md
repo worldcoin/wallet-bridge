@@ -1,0 +1,2 @@
+- Start with context in the `README.md`.
+- For any change, ensure it is compliant with all the project definitions in the `README.md`. A particular pitfall is trying to incorporate logic that is client-specific or environment-specific. All functionality should be agnostic to clients and environments.

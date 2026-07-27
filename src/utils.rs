@@ -49,9 +49,9 @@ pub type AppOverrides = HashMap<String, AppOverride>;
 pub enum RequestStatus {
     /// The request has been initiated by the client
     Initialized,
-    /// The request has been retrieved by World App
+    /// The request has been retrieved
     Retrieved,
-    /// The request has received a response from World App
+    /// The request has received a response
     Completed,
 }
 

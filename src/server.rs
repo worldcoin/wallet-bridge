@@ -11,9 +11,9 @@ use crate::utils::AppOverrides;
 pub async fn start(redis: ConnectionManager, app_overrides: Arc<AppOverrides>) {
     let mut openapi = OpenApi {
         info: Info {
-            title: "Wallet Bridge".to_string(),
+            title: "Message Bridge".to_string(),
             summary: Some(
-                "An end-to-end encrypted bridge for communicating with World App.".to_string(),
+                "A dumb, environment and client agnostic relay of arbitrary messages. It lets two parties share an arbitrary message where parties can gossip a symmetric key off-band.".to_string(),
             ),
             license: Some(License {
                 name: "MIT".to_string(),
@@ -40,7 +40,7 @@ pub async fn start(redis: ConnectionManager, app_overrides: Arc<AppOverrides>) {
         .await
         .expect("Failed to bind address");
 
-    println!("🪩 World Bridge started on http://{address}");
+    println!("🔛💬 Message Bridge started on http://{address}");
 
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())

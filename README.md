@@ -25,8 +25,6 @@ IDKit ->> Bridge: Poll for updates GET /response/:id
 Bridge ->> IDKit: <response>
 ```
 
-### Endpoints
-
 - `POST /request`: Called by IDKit. Initializes a proof verification request.
 - `GET /request/:id`: Called by Authenticator. Used to fetch the proof verification request. One time use.
 - `PUT /response/:id`: Called by Authenticator. Used to send the proof back to the application.
