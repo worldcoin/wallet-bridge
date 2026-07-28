@@ -1,5 +1,29 @@
 use serde_json::{json, Value};
+use std::sync::Arc;
+use tokio::sync::Barrier;
 use uuid::Uuid;
+
+use redis::AsyncCommands;
+
+fn flow_key(request_id: &str) -> String {
+    format!("flow:{request_id}")
+}
+
+async fn flow_id(request_id: &str) -> Option<String> {
+    common::redis_connection()
+        .await
+        .get(flow_key(request_id))
+        .await
+        .expect("read flow ID")
+}
+
+async fn redis_ttl(key: &str) -> i64 {
+    common::redis_connection()
+        .await
+        .ttl(key)
+        .await
+        .expect("read Redis TTL")
+}
 
 mod common;
 
@@ -600,4 +624,285 @@ async fn test_openapi_endpoint() {
 
     let json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
     assert!(json.get("openapi").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Tracing ID (idkit_flow_id) lives in separate, expiring Redis entries.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_flow_id_lifecycle_uses_fixed_ttl_and_cleans_up() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "lifecycle-request-iv",
+        "payload": "lifecycle-request-payload",
+    });
+
+    let (create_status, create_body) = common::post(&app, "/request", &request).await;
+    assert_eq!(create_status, 200, "request creation failed: {create_body}");
+    let create_json: Value = serde_json::from_str(&create_body).unwrap();
+    assert_eq!(create_json["request_id"], request_id);
+    assert!(
+        create_json.get("idkit_flow_id").is_none(),
+        "flow identifiers must not be exposed by POST /request"
+    );
+
+    let created_flow = flow_id(&request_id)
+        .await
+        .expect("flow ID after request create");
+    let uuid = created_flow
+        .strip_prefix("idkitflow_")
+        .expect("flow ID prefix");
+    Uuid::parse_str(uuid).expect("flow ID suffix is a UUID");
+    let created_ttl = redis_ttl(&flow_key(&request_id)).await;
+    assert!((901..=1800).contains(&created_ttl));
+
+    let (request_status, request_body) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(
+        request_status, 200,
+        "request consumption failed: {request_body}"
+    );
+    let request_json: Value = serde_json::from_str(&request_body).unwrap();
+    assert_eq!(
+        request_json,
+        json!({
+            "iv": "lifecycle-request-iv",
+            "payload": "lifecycle-request-payload",
+        }),
+        "GET /request response schema must stay unchanged"
+    );
+    assert_eq!(
+        flow_id(&request_id).await.as_deref(),
+        Some(created_flow.as_str())
+    );
+    let request_ttl = redis_ttl(&flow_key(&request_id)).await;
+    assert!(
+        request_ttl <= created_ttl,
+        "request consumption must not refresh the fixed flow TTL"
+    );
+
+    let response = json!({
+        "iv": "lifecycle-response-iv",
+        "payload": "lifecycle-response-payload",
+    });
+    let (put_status, put_body) =
+        common::put(&app, &format!("/response/{request_id}"), &response).await;
+    assert_eq!(put_status, 201, "response creation failed: {put_body}");
+
+    assert_eq!(
+        flow_id(&request_id).await.as_deref(),
+        Some(created_flow.as_str())
+    );
+    let response_ttl = redis_ttl(&flow_key(&request_id)).await;
+    assert!(
+        response_ttl <= request_ttl,
+        "response creation must not refresh the fixed flow TTL"
+    );
+
+    let (get_status, get_body) = common::get(&app, &format!("/response/{request_id}")).await;
+    assert_eq!(get_status, 200, "response consumption failed: {get_body}");
+    let get_json: Value = serde_json::from_str(&get_body).unwrap();
+    assert_eq!(get_json["status"], "completed");
+    assert_eq!(get_json["response"], response);
+    assert!(
+        get_json.get("idkit_flow_id").is_none(),
+        "GET /response must not expose flow identifiers"
+    );
+    assert!(
+        flow_id(&request_id).await.is_none(),
+        "flow ID is deleted after response consumption"
+    );
+    assert_eq!(redis_ttl(&format!("req:status:{request_id}")).await, -2);
+}
+
+#[tokio::test]
+async fn test_flow_ids_are_unique_and_never_replace_request_ids() {
+    let app = common::test_app().await;
+    let first_id = fresh_id();
+    let second_id = fresh_id();
+
+    for request_id in [&first_id, &second_id] {
+        let body = json!({
+            "request_id": request_id,
+            "iv": "unique-iv",
+            "payload": "unique-payload",
+        });
+        let (status, response) = common::post(&app, "/request", &body).await;
+        assert_eq!(status, 200);
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["request_id"], request_id.as_str());
+        assert!(response.get("idkit_flow_id").is_none());
+    }
+
+    let first_flow = flow_id(&first_id).await.unwrap();
+    let second_flow = flow_id(&second_id).await.unwrap();
+    assert_ne!(first_flow, second_flow);
+    assert_ne!(first_flow, first_id);
+    assert_ne!(second_flow, second_id);
+}
+
+#[tokio::test]
+async fn test_response_polling_preserves_flow_id() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "polling-flow-iv",
+        "payload": "polling-flow-payload",
+    });
+
+    let (create_status, create_body) = common::post(&app, "/request", &request).await;
+    assert_eq!(create_status, 200, "request creation failed: {create_body}");
+    let expected_flow = flow_id(&request_id).await.expect("flow ID after create");
+
+    let (poll_status, poll_body) = common::get(&app, &format!("/response/{request_id}")).await;
+    assert_eq!(poll_status, 200, "response polling failed: {poll_body}");
+    assert_eq!(
+        flow_id(&request_id).await.as_deref(),
+        Some(expected_flow.as_str()),
+        "polling without a response must not consume the flow ID"
+    );
+}
+
+#[tokio::test]
+async fn test_concurrent_response_consumers_keep_response_one_time() {
+    const CONSUMERS: usize = 8;
+
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "concurrent-request-iv",
+        "payload": "concurrent-request-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
+
+    let response = json!({
+        "iv": "concurrent-response-iv",
+        "payload": "concurrent-response-payload",
+    });
+    let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
+    assert_eq!(status, 201, "response creation failed: {body}");
+
+    let response_url = format!("/response/{request_id}");
+    let barrier = Arc::new(Barrier::new(CONSUMERS));
+    let mut consumers = Vec::with_capacity(CONSUMERS);
+    for _ in 0..CONSUMERS {
+        let app = app.clone();
+        let barrier = Arc::clone(&barrier);
+        let response_url = response_url.clone();
+        consumers.push(tokio::spawn(async move {
+            barrier.wait().await;
+            common::get(&app, &response_url).await.0
+        }));
+    }
+
+    let mut statuses = Vec::with_capacity(CONSUMERS);
+    for consumer in consumers {
+        statuses.push(consumer.await.unwrap());
+    }
+    assert_eq!(statuses.iter().filter(|&&status| status == 200).count(), 1);
+    assert_eq!(
+        statuses.iter().filter(|&&status| status == 404).count(),
+        CONSUMERS - 1
+    );
+}
+
+#[tokio::test]
+async fn test_legacy_missing_flow_id_does_not_break_round_trip() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "legacy-request-iv",
+        "payload": "legacy-request-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    let deleted: usize = common::redis_connection()
+        .await
+        .del(flow_key(&request_id))
+        .await
+        .expect("delete flow ID");
+    assert_eq!(deleted, 1);
+
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(status, 200, "legacy request consumption failed: {body}");
+
+    let response = json!({
+        "iv": "legacy-response-iv",
+        "payload": "legacy-response-payload",
+    });
+    let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
+    assert_eq!(status, 201, "legacy response creation failed: {body}");
+
+    let (status, body) = common::get(&app, &format!("/response/{request_id}")).await;
+    assert_eq!(status, 200, "legacy response consumption failed: {body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["response"], response);
+}
+
+#[tokio::test]
+async fn test_malformed_flow_id_is_best_effort() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "malformed-request-iv",
+        "payload": "malformed-request-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    common::redis_connection()
+        .await
+        .set_ex::<_, _, ()>(flow_key(&request_id), b"not-a-flow-id", 1800)
+        .await
+        .expect("inject malformed flow ID");
+
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(
+        status, 200,
+        "flow ID parse failure must not break request consumption: {body}"
+    );
+
+    let response = json!({
+        "iv": "malformed-response-iv",
+        "payload": "malformed-response-payload",
+    });
+    let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
+    assert_eq!(
+        status, 201,
+        "flow ID parse failure must not break response creation: {body}"
+    );
+
+    let (status, body) = common::get(&app, &format!("/response/{request_id}")).await;
+    assert_eq!(
+        status, 200,
+        "flow ID parse failure must not break response consumption: {body}"
+    );
+    assert!(flow_id(&request_id).await.is_none());
+}
+
+#[tokio::test]
+async fn test_standalone_response_does_not_create_idkit_flow_id() {
+    let app = common::test_app().await;
+    let response = json!({
+        "iv": "standalone-untraced-iv",
+        "payload": "standalone-untraced-payload",
+    });
+    let (status, body) = common::post(&app, "/response", &response).await;
+    assert_eq!(status, 201, "standalone response creation failed: {body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    let request_id = body["request_id"].as_str().unwrap();
+    assert!(
+        flow_id(request_id).await.is_none(),
+        "standalone response flows stay outside WDP85 tracing"
+    );
 }

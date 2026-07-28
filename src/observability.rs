@@ -112,6 +112,25 @@ pub fn record_request_handoff(value: Option<&str>) -> Option<IdkitFlowId> {
     Some(idkit_flow_id)
 }
 
+/// Record a response-side flow identifier when one exists.
+///
+/// Missing identifiers are expected for standalone and legacy response flows.
+/// Malformed identifiers are reported but never block payload delivery.
+pub fn record_response_handoff(value: Option<&str>) {
+    let Some(value) = value else {
+        return;
+    };
+    let Some(idkit_flow_id) = IdkitFlowId::from_redis(value) else {
+        tracing::warn!(
+            outcome = "flow_id_invalid",
+            operation = "response_handoff",
+            "Failed to observe IDKit flow ID"
+        );
+        return;
+    };
+    record_idkit_flow_id(&idkit_flow_id);
+}
+
 fn record_idkit_flow_id(idkit_flow_id: &IdkitFlowId) {
     Span::current().record("idkit_flow_id", field::display(idkit_flow_id));
 }
