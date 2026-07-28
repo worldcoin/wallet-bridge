@@ -37,7 +37,7 @@ pub(super) struct RequestResponse {
 
 #[tracing::instrument(
     parent = None,
-    name = "wallet_bridge.request.consume",
+    name = "message_bridge.request.consume",
     skip_all,
     fields(
         idkit_flow_id = tracing::field::Empty,
@@ -76,6 +76,9 @@ pub(super) async fn handler(
         .map_err(handle_redis_error)?;
 
     let idkit_flow_id = observability::record_request_handoff(idkit_flow_id.as_deref());
+
+    telemetry_batteries::reexports::metrics::counter!("message_bridge.request_consumed")
+        .increment(1);
 
     Ok(Json(RequestResponse {
         iv: payload.iv,

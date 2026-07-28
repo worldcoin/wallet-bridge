@@ -13,7 +13,7 @@ async fn main() {
 
     let _telemetry_guard = telemetry_batteries::init().expect("Failed to initialize telemetry");
 
-    tracing::info!("Starting wallet bridge...");
+    tracing::info!("Starting message bridge...");
 
     let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| {
         let host = env::var("REDIS_HOST").expect("REDIS_HOST required if REDIS_URL is not set.");

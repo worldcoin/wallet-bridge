@@ -3,7 +3,7 @@ use axum::{routing::get, Extension};
 use axum_jsonschema::Json;
 
 pub fn handler() -> ApiRouter {
-    let scalar = Scalar::new("/openapi.json").with_title("Wallet Bridge Docs");
+    let scalar = Scalar::new("/openapi.json").with_title("Message Bridge Docs");
 
     ApiRouter::new()
         .route("/", get(get_info))
