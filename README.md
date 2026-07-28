@@ -1,4 +1,4 @@
-# Message Bridge (previously Wallet Bridge)
+# Message Bridge
 
 The message bridge is a **dumb**, environment and client agnostic relay of arbitrary messages. It lets two parties share an arbitrary message where parties can gossip a
 symmetric key off-band.

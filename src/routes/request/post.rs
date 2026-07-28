@@ -71,7 +71,7 @@ pub(super) struct RequestCreatedPayload {
 /// with NX semantics; otherwise generates a UUID v4.
 #[tracing::instrument(
     parent = None,
-    name = "wallet_bridge.request.create",
+    name = "message_bridge.request.create",
     skip_all,
     fields(
         idkit_flow_id = tracing::field::Empty,
@@ -130,6 +130,9 @@ pub(super) async fn handler(
     {
         tracing::warn!(outcome, "Failed to mint and store IDKit flow ID");
     }
+
+    telemetry_batteries::reexports::metrics::counter!("message_bridge.request_created")
+        .increment(1);
 
     Ok(Json(RequestCreatedPayload {
         request_id,
