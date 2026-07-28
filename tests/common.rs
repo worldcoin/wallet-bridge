@@ -54,7 +54,20 @@ async fn send(
     route: &str,
     body: Option<&Value>,
 ) -> (u16, String) {
-    let builder = Request::builder().uri(route).method(method);
+    send_with_headers(app, method, route, body, &[]).await
+}
+
+async fn send_with_headers(
+    app: &axum::Router,
+    method: Method,
+    route: &str,
+    body: Option<&Value>,
+    headers: &[(&str, &str)],
+) -> (u16, String) {
+    let mut builder = Request::builder().uri(route).method(method);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
     let request = match body {
         Some(json) => builder
             .header("Content-Type", "application/json")
@@ -83,6 +96,15 @@ async fn send(
 
 pub async fn get(app: &axum::Router, route: &str) -> (u16, String) {
     send(app, Method::GET, route, None).await
+}
+
+pub async fn get_with_header(
+    app: &axum::Router,
+    route: &str,
+    name: &str,
+    value: &str,
+) -> (u16, String) {
+    send_with_headers(app, Method::GET, route, None, &[(name, value)]).await
 }
 
 pub async fn post(app: &axum::Router, route: &str, body: &Value) -> (u16, String) {
