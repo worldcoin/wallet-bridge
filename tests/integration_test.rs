@@ -598,7 +598,7 @@ async fn test_openapi_endpoint() {
 }
 
 // ---------------------------------------------------------------------------
-// WDP85 tracing IDs live in separate, expiring Redis entries.
+// Tracing ID (idkit_flow_id) lives in separate, expiring Redis entries.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
