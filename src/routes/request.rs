@@ -22,6 +22,8 @@ use crate::utils::{
 };
 
 const REQ_PREFIX: &str = "req:";
+/// If this header is present and to `true`, the GET /request will include an `idkit_flow_id` for telemetry correlation
+/// We're adding this header to avoid breaking existing client that don't expect this field in the response
 const ACCEPT_IDKIT_FLOW_ID_HEADER: &str = "accept-idkit-flow-id";
 const IDKIT_FLOW_ID_PREFIX: &str = "idkitflow_";
 
@@ -81,7 +83,7 @@ struct RequestResponse {
     /// The opaque encrypted request payload.
     #[serde(flatten)]
     payload: RequestPayload,
-    /// Correlates this handoff with compatible client telemetry.
+    /// Only present when the client explicitly opts in via the `accept-idkit-flow-id` header.
     #[serde(skip_serializing_if = "Option::is_none")]
     idkit_flow_id: Option<String>,
 }
@@ -179,6 +181,7 @@ async fn get_request(
     let payload: RequestPayload =
         serde_json::from_slice(&value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // TODO: use this for telemetry in the bridge PR #103
     let idkit_flow_id = accepts_idkit_flow_id(&headers)
         .then(|| format!("{IDKIT_FLOW_ID_PREFIX}{}", Uuid::new_v4()));
 
