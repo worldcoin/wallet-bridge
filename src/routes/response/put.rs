@@ -16,7 +16,7 @@ use super::RES_PREFIX;
 
 #[tracing::instrument(
     parent = None,
-    name = "wallet_bridge.response.create",
+    name = "message_bridge.response.create",
     skip_all,
     fields(
         idkit_flow_id = tracing::field::Empty,
@@ -71,6 +71,9 @@ pub(super) async fn handler(
         .del::<_, ()>(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
         .map_err(handle_redis_error)?;
+
+    telemetry_batteries::reexports::metrics::counter!("message_bridge.response_created")
+        .increment(1);
 
     Ok(StatusCode::CREATED)
 }

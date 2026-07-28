@@ -22,7 +22,7 @@ pub(super) struct Response {
 
 #[tracing::instrument(
     parent = None,
-    name = "wallet_bridge.response.consume",
+    name = "message_bridge.response.consume",
     skip_all,
     fields(
         idkit_flow_id = tracing::field::Empty,
@@ -69,6 +69,9 @@ pub(super) async fn handler(
                 "Failed to clean up IDKit flow ID"
             );
         }
+
+        telemetry_batteries::reexports::metrics::counter!("message_bridge.response_consumed")
+            .increment(1);
 
         return Ok(Json(Response {
             response,
