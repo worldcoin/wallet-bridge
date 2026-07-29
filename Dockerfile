@@ -5,11 +5,9 @@ FROM rust:1.88-slim AS chef
 USER root
 WORKDIR /app
 
-# Install OS dependencies (perl & make required for vendored openssl)
+# Install OS dependencies (musl target toolchain; the C compiler builds `ring`)
 RUN apt-get update && apt-get install -y \
     musl-tools \
-    perl \
-    make \
     && rm -rf /var/lib/apt/lists/*
 
 RUN rustup target add x86_64-unknown-linux-musl
