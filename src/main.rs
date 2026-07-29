@@ -32,6 +32,11 @@ async fn main() {
         )
     });
 
+    // Rustls is used for Redis TLS
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls ring crypto provider");
+
     tracing::info!("Attempting to connect to Redis...");
 
     let redis = build_redis_pool(redis_url)
@@ -85,7 +90,7 @@ async fn build_redis_pool(redis_url: String) -> redis::RedisResult<ConnectionMan
     .await
     .map_err(|_| {
         redis::RedisError::from((
-            redis::ErrorKind::IoError,
+            redis::ErrorKind::Io,
             "Redis connection timeout after 30 seconds",
         ))
     })?
