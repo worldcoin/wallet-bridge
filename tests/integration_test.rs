@@ -61,10 +61,73 @@ async fn test_get_request_one_time_use() {
     let first_json: Value = serde_json::from_str(&first_body).expect("Failed to parse JSON");
     assert_eq!(first_json["iv"], "get_test_iv");
     assert_eq!(first_json["payload"], "get_test_payload");
+    assert!(
+        first_json.get("idkit_flow_id").is_none(),
+        "legacy response shape must omit the flow ID without an opt-in header"
+    );
 
     // Second GET should fail (one-time use)
     let (second_status, _) = common::get(&app, &get_url).await;
     assert_eq!(second_status, 404);
+}
+
+#[tokio::test]
+async fn test_get_request_returns_flow_id_when_client_opts_in() {
+    let app = common::test_app().await;
+    let payload = json!({
+        "iv": "flow_test_iv",
+        "payload": "flow_test_payload"
+    });
+
+    let (status_code, body) = common::post(&app, "/request", &payload).await;
+    assert_eq!(status_code, 200);
+
+    let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
+    let request_id = create_json["request_id"].as_str().unwrap();
+    let get_url = format!("/request/{request_id}");
+
+    let (get_status, get_body) =
+        common::get_with_header(&app, &get_url, "Accept-IDKit-Flow-ID", "true").await;
+
+    assert_eq!(get_status, 200);
+
+    let response: Value = serde_json::from_str(&get_body).expect("Failed to parse JSON");
+    assert_eq!(response["iv"], "flow_test_iv");
+    assert_eq!(response["payload"], "flow_test_payload");
+
+    let flow_id = response["idkit_flow_id"]
+        .as_str()
+        .expect("opted-in response must include a flow ID");
+    let uuid = flow_id
+        .strip_prefix("idkitflow_")
+        .expect("flow ID must use the IDKit prefix");
+    assert!(Uuid::parse_str(uuid).is_ok());
+}
+
+#[tokio::test]
+async fn test_get_request_requires_true_flow_id_header_value() {
+    let app = common::test_app().await;
+    let payload = json!({
+        "iv": "flow_false_iv",
+        "payload": "flow_false_payload"
+    });
+
+    let (status_code, body) = common::post(&app, "/request", &payload).await;
+    assert_eq!(status_code, 200);
+
+    let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
+    let request_id = create_json["request_id"].as_str().unwrap();
+    let get_url = format!("/request/{request_id}");
+    let (get_status, get_body) =
+        common::get_with_header(&app, &get_url, "Accept-IDKit-Flow-ID", "false").await;
+
+    assert_eq!(get_status, 200);
+
+    let response: Value = serde_json::from_str(&get_body).expect("Failed to parse JSON");
+    assert!(
+        response.get("idkit_flow_id").is_none(),
+        "non-true header values must preserve the legacy response shape"
+    );
 }
 
 /// Test PUT /response/:id stores a response for a request

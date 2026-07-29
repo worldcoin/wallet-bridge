@@ -4,7 +4,7 @@ use aide::axum::{
 };
 use axum::{
     extract::Path,
-    http::{Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     Extension,
 };
 use axum_jsonschema::Json;
@@ -22,6 +22,10 @@ use crate::utils::{
 };
 
 const REQ_PREFIX: &str = "req:";
+/// If this header is present and to `true`, the GET /request will include an `idkit_flow_id` for telemetry correlation
+/// We're adding this header to avoid breaking existing client that don't expect this field in the response
+const ACCEPT_IDKIT_FLOW_ID_HEADER: &str = "accept-idkit-flow-id";
+const IDKIT_FLOW_ID_PREFIX: &str = "idkitflow_";
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 struct CreateRequestBody {
@@ -74,11 +78,21 @@ struct RequestCreatedPayload {
     app_overrides: AppOverrides,
 }
 
+#[derive(Debug, serde::Serialize, JsonSchema)]
+struct RequestResponse {
+    /// The opaque encrypted request payload.
+    #[serde(flatten)]
+    payload: RequestPayload,
+    /// Only present when the client explicitly opts in via the `accept-idkit-flow-id` header.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idkit_flow_id: Option<String>,
+}
+
 pub fn handler() -> ApiRouter {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_headers(AllowHeaders::any())
-        .allow_methods([Method::POST, Method::HEAD, Method::PUT]);
+        .allow_methods([Method::GET, Method::POST, Method::HEAD, Method::PUT]);
 
     let environment = env::var("ENVIRONMENT")
         .unwrap_or_else(|_| "unknown".to_string())
@@ -125,7 +139,8 @@ async fn has_request(
 async fn get_request(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
-) -> Result<Json<RequestPayload>, StatusCode> {
+    headers: HeaderMap,
+) -> Result<Json<RequestResponse>, StatusCode> {
     let request_id = request_id.to_lowercase();
     if validate_request_id(&request_id).is_err() {
         return Err(StatusCode::BAD_REQUEST);
@@ -163,9 +178,28 @@ async fn get_request(
         RequestStatus::Retrieved
     );
 
-    serde_json::from_slice(&value).map_or(Err(StatusCode::INTERNAL_SERVER_ERROR), |value| {
-        Ok(Json(value))
-    })
+    let payload: RequestPayload =
+        serde_json::from_slice(&value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // TODO: use this for telemetry in the bridge PR #103
+    let idkit_flow_id = accepts_idkit_flow_id(&headers)
+        .then(|| format!("{IDKIT_FLOW_ID_PREFIX}{}", Uuid::new_v4()));
+
+    Ok(Json(RequestResponse {
+        payload,
+        idkit_flow_id,
+    }))
+}
+
+/// Treat the opt-in header as enabled only for the explicit value `true`.
+///
+/// Header names are case-insensitive; the value comparison is also
+/// case-insensitive for compatibility with common HTTP clients.
+fn accepts_idkit_flow_id(headers: &HeaderMap) -> bool {
+    headers
+        .get(ACCEPT_IDKIT_FLOW_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 /// Create a new request. Optionally accepts a client-supplied `request_id`
