@@ -19,9 +19,10 @@ use super::REQ_PREFIX;
 
 /// Capability-negotiation header for backwards-compatible flow correlation.
 ///
-/// Existing request consumers may reject unknown JSON fields. Only consumers
-/// that send this header receive `idkit_flow_id`; callers that omit it retain
-/// the legacy `{iv, payload}` response shape.
+/// When this header is present with the value `true`, `GET /request/:request_id`
+/// includes `idkit_flow_id`. Callers that omit it retain the legacy
+/// `{iv, payload}` response shape so clients that reject unknown fields remain
+/// compatible.
 const ACCEPT_IDKIT_FLOW_ID_HEADER: &str = "accept-idkit-flow-id";
 
 #[derive(Debug, serde::Serialize, JsonSchema)]
@@ -30,7 +31,8 @@ pub(super) struct RequestResponse {
     iv: String,
     /// The encrypted payload.
     payload: String,
-    /// Correlates this bridge handoff with compatible `IDKit` telemetry.
+    /// Only present when the client explicitly opts in via
+    /// `accept-idkit-flow-id: true`.
     #[serde(skip_serializing_if = "Option::is_none")]
     idkit_flow_id: Option<IdkitFlowId>,
 }
