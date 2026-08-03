@@ -58,6 +58,13 @@ async fn get_response(
 ) -> Result<Json<Response>, StatusCode> {
     let request_id = request_id.to_lowercase();
     if validate_request_id(&request_id).is_err() {
+        tracing::warn!(
+            method = "GET",
+            request_id = %request_id,
+            status_code = 400,
+            reason = "invalid_request_id",
+            "Rejecting response request"
+        );
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -127,6 +134,13 @@ async fn has_response_status(
 ) -> StatusCode {
     let request_id = request_id.to_lowercase();
     if validate_request_id(&request_id).is_err() {
+        tracing::warn!(
+            method = "HEAD",
+            request_id = %request_id,
+            status_code = 400,
+            reason = "invalid_request_id",
+            "Rejecting response request"
+        );
         return StatusCode::BAD_REQUEST;
     }
 
@@ -150,18 +164,46 @@ async fn insert_response(
     Json(request): Json<RequestPayload>,
 ) -> Result<StatusCode, StatusCode> {
     let request_id = request_id.to_lowercase();
-    validate_request_id(&request_id)?;
+    if validate_request_id(&request_id).is_err() {
+        tracing::warn!(
+            method = "PUT",
+            request_id = %request_id,
+            status_code = 400,
+            reason = "invalid_request_id",
+            "Rejecting response request"
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     //ANCHOR - Check the request is valid
     let current_status = redis
         .get::<_, Option<String>>(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
-        .map_err(handle_redis_error)?
-        .and_then(|s| RequestStatus::from_str(&s).ok());
+        .map_err(handle_redis_error)?;
 
     let Some(current_status) = current_status else {
+        tracing::warn!(
+            method = "PUT",
+            request_id = %request_id,
+            status_code = 400,
+            reason = "request_status_not_found",
+            "Rejecting response request"
+        );
         return Err(StatusCode::BAD_REQUEST);
     };
+
+    let current_status = RequestStatus::from_str(&current_status).map_err(|error| {
+        tracing::warn!(
+            method = "PUT",
+            request_id = %request_id,
+            status_code = 400,
+            reason = "invalid_request_status",
+            stored_status = %current_status,
+            error = %error,
+            "Rejecting response request"
+        );
+        StatusCode::BAD_REQUEST
+    })?;
 
     //ANCHOR - Atomically store the response with TTL if not already set (idempotent)
     let options = SetOptions::default()
