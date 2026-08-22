@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
+use crate::flow;
 use crate::utils::{
     handle_redis_error, validate_request_id, AppOverrides, RequestPayload, RequestStatus,
     EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
@@ -25,7 +26,6 @@ const REQ_PREFIX: &str = "req:";
 /// If this header is present and to `true`, the GET /request will include an `idkit_flow_id` for telemetry correlation
 /// We're adding this header to avoid breaking existing client that don't expect this field in the response
 const ACCEPT_IDKIT_FLOW_ID_HEADER: &str = "accept-idkit-flow-id";
-const IDKIT_FLOW_ID_PREFIX: &str = "idkitflow_";
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 struct CreateRequestBody {
@@ -83,7 +83,10 @@ struct RequestResponse {
     /// The opaque encrypted request payload.
     #[serde(flatten)]
     payload: RequestPayload,
-    /// Only present when the client explicitly opts in via the `accept-idkit-flow-id` header.
+    /// The flow id minted when the request was created, for telemetry
+    /// correlation. Only present when the client explicitly opts in via the
+    /// `accept-idkit-flow-id` header *and* the flow metadata is still in Redis
+    /// (it can be missing if the best-effort write failed at create time).
     #[serde(skip_serializing_if = "Option::is_none")]
     idkit_flow_id: Option<String>,
 }
@@ -146,12 +149,15 @@ async fn get_request(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Use a transaction to get both status and request data atomically
+    // Use a transaction to get both status and request data atomically.
+    // The flow metadata rides along: read for telemetry, TTL refreshed so it
+    // survives until the response leg (mirroring the status-key refresh below).
     let mut pipe = redis::pipe();
     pipe.get(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .get_del(format!("{REQ_PREFIX}{request_id}"));
+    flow::pipe_read_and_refresh(&mut pipe, &request_id);
 
-    let (status, value): (Option<String>, Option<Vec<u8>>) = pipe
+    let (status, value, flow_raw): (Option<String>, Option<Vec<u8>>, Option<Vec<u8>>) = pipe
         .query_async(&mut redis)
         .await
         .map_err(handle_redis_error)?;
@@ -181,9 +187,10 @@ async fn get_request(
     let payload: RequestPayload =
         serde_json::from_slice(&value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // TODO: use this for telemetry in the bridge PR #103
-    let idkit_flow_id = accepts_idkit_flow_id(&headers)
-        .then(|| format!("{IDKIT_FLOW_ID_PREFIX}{}", Uuid::new_v4()));
+    // Telemetry always fires on consumption; the header only gates whether the
+    // persisted flow id is surfaced to the client.
+    let idkit_flow_id = flow::record_request_consumed(flow_raw.as_deref())
+        .filter(|_| accepts_idkit_flow_id(&headers));
 
     Ok(Json(RequestResponse {
         payload,
@@ -209,14 +216,7 @@ async fn insert_request(
     Extension(app_overrides): Extension<Arc<AppOverrides>>,
     Json(body): Json<CreateRequestBody>,
 ) -> Result<Json<RequestCreatedPayload>, StatusCode> {
-    let request_id = match body.request_id {
-        Some(id) => {
-            let id = id.to_lowercase();
-            validate_request_id(&id)?;
-            id
-        }
-        None => Uuid::new_v4().to_string(),
-    };
+    let request_id = resolve_request_id(body.request_id)?;
 
     tracing::info!("Processing /request: {request_id}");
 
@@ -252,12 +252,27 @@ async fn insert_request(
         RequestStatus::Initialized
     );
 
+    flow::record_request_created(&mut redis, &request_id, "/request", 200).await;
+
     tracing::info!("Successfully processed /request: {request_id}");
 
     Ok(Json(RequestCreatedPayload {
         request_id,
         app_overrides: select_response_overrides(body.supports_app_overrides, &app_overrides),
     }))
+}
+
+/// Resolve the id for a new request: the validated, lowercased client-supplied
+/// value if present, otherwise a fresh UUID v4.
+fn resolve_request_id(supplied: Option<String>) -> Result<String, StatusCode> {
+    match supplied {
+        Some(id) => {
+            let id = id.to_lowercase();
+            validate_request_id(&id)?;
+            Ok(id)
+        }
+        None => Ok(Uuid::new_v4().to_string()),
+    }
 }
 
 /// Pick the overrides to echo back on `POST /request`: the configured map for
@@ -308,6 +323,9 @@ async fn put_request(
         )
         .await
         .map_err(handle_redis_error)?;
+
+    // Re-mint on every PUT: overwriting the payload starts a new flow.
+    flow::record_request_created(&mut redis, &request_id, "/request/:request_id", 201).await;
 
     tracing::info!("Successfully PUT /request: {request_id}");
 

@@ -34,6 +34,12 @@ fn fixture_overrides() -> AppOverrides {
     overrides
 }
 
+/// Direct Redis handle for tests that assert on the bridge's internal keys
+/// (e.g. `flow:<request_id>` metadata).
+pub async fn redis() -> ConnectionManager {
+    redis_connection().await
+}
+
 async fn redis_connection() -> ConnectionManager {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let client = redis::Client::open(url).expect("REDIS_URL must be a valid Redis URL");

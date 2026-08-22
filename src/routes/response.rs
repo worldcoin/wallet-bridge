@@ -16,6 +16,7 @@ use std::str;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use uuid::Uuid;
 
+use crate::flow;
 use crate::utils::{
     handle_redis_error, validate_request_id, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS,
     REQ_STATUS_PREFIX,
@@ -92,6 +93,11 @@ async fn get_response(
                 "Failed to delete status for {request_id} after response retrieval: {e}"
             );
         }
+
+        // End of the flow: consume (GETDEL) the flow metadata and emit the
+        // response-leg handoff telemetry. The flow id is never returned to
+        // the RP. Pending polls (no payload yet) never reach this point.
+        flow::record_response_consumed(&mut redis, &request_id).await;
 
         return serde_json::from_slice(&value).map_or(
             Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -180,6 +186,10 @@ async fn insert_response(
     if set_ok.is_none() {
         return Err(StatusCode::CONFLICT);
     }
+
+    // Stamp the response-persisted timestamp into the flow metadata and
+    // refresh its TTL, now that the response is durably stored.
+    flow::record_response_created(&mut redis, &request_id).await;
 
     tracing::info!(
         "Request {request_id} state transition: {} -> {}",

@@ -1,3 +1,4 @@
+use redis::AsyncCommands;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -600,4 +601,169 @@ async fn test_openapi_endpoint() {
 
     let json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
     assert!(json.get("openapi").is_some());
+}
+
+/// The flow id is minted at POST /request time and persisted in Redis under
+/// `flow:<request_id>`; the consuming GET returns exactly that persisted id
+/// (not a fresh mint), and the flow key survives request consumption so the
+/// response leg can be correlated.
+#[tokio::test]
+async fn test_flow_id_minted_at_create_and_stable_through_get() {
+    let app = common::test_app().await;
+    let mut redis = common::redis().await;
+
+    let (status, body) = common::post(&app, "/request", &json!({"iv": "a", "payload": "b"})).await;
+    assert_eq!(status, 200);
+    let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
+    let request_id = create_json["request_id"].as_str().unwrap().to_string();
+
+    let raw: Option<Vec<u8>> = redis.get(format!("flow:{request_id}")).await.unwrap();
+    let stored: Value =
+        serde_json::from_slice(&raw.expect("flow metadata must be persisted at create")).unwrap();
+    let stored_flow_id = stored["idkit_flow_id"].as_str().unwrap().to_string();
+    assert!(stored_flow_id.starts_with("idkitflow_"));
+    assert!(stored["request_persisted_at_ms"].as_u64().unwrap() > 0);
+    assert!(
+        stored.get("response_persisted_at_ms").is_none(),
+        "response stamp must be absent before the response leg"
+    );
+
+    let (get_status, get_body) = common::get_with_header(
+        &app,
+        &format!("/request/{request_id}"),
+        "Accept-IDKit-Flow-ID",
+        "true",
+    )
+    .await;
+    assert_eq!(get_status, 200);
+    let response: Value = serde_json::from_str(&get_body).expect("Failed to parse JSON");
+    assert_eq!(
+        response["idkit_flow_id"].as_str().unwrap(),
+        stored_flow_id,
+        "GET must return the persisted flow id, not a fresh one"
+    );
+
+    let alive: bool = redis.exists(format!("flow:{request_id}")).await.unwrap();
+    assert!(
+        alive,
+        "flow key must survive until the response is consumed"
+    );
+}
+
+/// PUT /response/:id stamps `response_persisted_at_ms` into the flow metadata;
+/// the consuming GET /response/:id deletes the flow key and never exposes the
+/// flow id to the RP.
+#[tokio::test]
+async fn test_flow_metadata_response_leg_and_cleanup() {
+    let app = common::test_app().await;
+    let mut redis = common::redis().await;
+
+    let (_, body) = common::post(&app, "/request", &json!({"iv": "a", "payload": "b"})).await;
+    let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
+    let request_id = create_json["request_id"].as_str().unwrap().to_string();
+
+    let (get_status, _) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(get_status, 200);
+
+    let (put_status, _) = common::put(
+        &app,
+        &format!("/response/{request_id}"),
+        &json!({"iv": "r", "payload": "rp"}),
+    )
+    .await;
+    assert_eq!(put_status, 201);
+
+    let raw: Option<Vec<u8>> = redis.get(format!("flow:{request_id}")).await.unwrap();
+    let stored: Value =
+        serde_json::from_slice(&raw.expect("flow metadata must still exist after PUT")).unwrap();
+    assert!(
+        stored["response_persisted_at_ms"].as_u64().unwrap()
+            >= stored["request_persisted_at_ms"].as_u64().unwrap(),
+        "PUT /response must stamp the response-persisted timestamp"
+    );
+
+    let (get_status, get_body) = common::get(&app, &format!("/response/{request_id}")).await;
+    assert_eq!(get_status, 200);
+    let json: Value = serde_json::from_str(&get_body).expect("Failed to parse JSON");
+    assert_eq!(json["status"], "completed");
+    assert_eq!(json["response"]["iv"], "r");
+    assert!(
+        json.get("idkit_flow_id").is_none() && json["response"].get("idkit_flow_id").is_none(),
+        "the flow id must never be returned to the RP"
+    );
+
+    let alive: bool = redis.exists(format!("flow:{request_id}")).await.unwrap();
+    assert!(
+        !alive,
+        "flow key must be deleted once the response is consumed"
+    );
+}
+
+/// Missing flow metadata (expired mid-flow, or a request written by a bridge
+/// version that predates flow tracing) must degrade gracefully: the payload
+/// handoff succeeds end-to-end, just without a flow id.
+#[tokio::test]
+async fn test_missing_flow_metadata_degrades_gracefully() {
+    let app = common::test_app().await;
+    let mut redis = common::redis().await;
+
+    let (_, body) = common::post(&app, "/request", &json!({"iv": "a", "payload": "b"})).await;
+    let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
+    let request_id = create_json["request_id"].as_str().unwrap().to_string();
+
+    redis
+        .del::<_, ()>(format!("flow:{request_id}"))
+        .await
+        .unwrap();
+
+    let (get_status, get_body) = common::get_with_header(
+        &app,
+        &format!("/request/{request_id}"),
+        "Accept-IDKit-Flow-ID",
+        "true",
+    )
+    .await;
+    assert_eq!(get_status, 200);
+    let response: Value = serde_json::from_str(&get_body).expect("Failed to parse JSON");
+    assert_eq!(response["iv"], "a");
+    assert!(
+        response.get("idkit_flow_id").is_none(),
+        "no persisted metadata means no flow id, even for opted-in clients"
+    );
+
+    let (put_status, _) = common::put(
+        &app,
+        &format!("/response/{request_id}"),
+        &json!({"iv": "r", "payload": "rp"}),
+    )
+    .await;
+    assert_eq!(put_status, 201);
+
+    let (get_status, get_body) = common::get(&app, &format!("/response/{request_id}")).await;
+    assert_eq!(get_status, 200);
+    let json: Value = serde_json::from_str(&get_body).expect("Failed to parse JSON");
+    assert_eq!(json["status"], "completed");
+}
+
+/// Standalone responses (POST /response) are out of flow-tracing scope: no
+/// flow metadata is minted and their consumption still works.
+#[tokio::test]
+async fn test_standalone_response_mints_no_flow_metadata() {
+    let app = common::test_app().await;
+    let mut redis = common::redis().await;
+
+    let (status, body) =
+        common::post(&app, "/response", &json!({"iv": "s", "payload": "sp"})).await;
+    assert_eq!(status, 201);
+    let create_json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
+    let request_id = create_json["request_id"].as_str().unwrap().to_string();
+
+    let exists: bool = redis.exists(format!("flow:{request_id}")).await.unwrap();
+    assert!(!exists, "standalone responses must not mint flow metadata");
+
+    let (get_status, get_body) = common::get(&app, &format!("/response/{request_id}")).await;
+    assert_eq!(get_status, 200);
+    let json: Value = serde_json::from_str(&get_body).expect("Failed to parse JSON");
+    assert_eq!(json["status"], "completed");
+    assert_eq!(json["response"]["iv"], "s");
 }
