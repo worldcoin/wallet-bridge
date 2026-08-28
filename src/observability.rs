@@ -1,7 +1,7 @@
 //! Correlation helpers for tracing a message across bridge handoffs.
 //!
-//! Flow identifiers deliberately carry no timing or client data. They only
-//! connect bounded bridge spans and expire after a fixed correlation window.
+//! Records request/response create and consume spans and counters. Flow
+//! identifiers connect those spans so handoff latency can be measured.
 
 use std::fmt;
 

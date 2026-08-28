@@ -103,7 +103,6 @@ pub(super) async fn handler(
     let payload_bytes =
         serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // SET NX on the payload — collisions return 409 in a single round trip.
     let options = SetOptions::default()
         .conditional_set(ExistenceCheck::NX)
         .with_expiration(SetExpiry::EX(EXPIRE_AFTER_SECONDS));
