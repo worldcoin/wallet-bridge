@@ -657,7 +657,7 @@ async fn test_flow_id_lifecycle_uses_fixed_ttl_and_cleans_up() {
         .expect("flow ID prefix");
     Uuid::parse_str(uuid).expect("flow ID suffix is a UUID");
     let created_ttl = redis_ttl(&flow_key(&request_id)).await;
-    assert!((901..=1800).contains(&created_ttl));
+    assert!((1801..=2700).contains(&created_ttl));
 
     let (request_status, request_body) = common::get(&app, &format!("/request/{request_id}")).await;
     assert_eq!(

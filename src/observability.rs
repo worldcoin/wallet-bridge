@@ -18,13 +18,8 @@ pub const FLOW_PREFIX: &str = "flow:";
 
 const IDKIT_FLOW_ID_PREFIX: &str = "idkitflow_";
 
-/// Flow correlation can span one full request TTL before consumption and one
-/// full response TTL afterward. Allocate both 15-minute legs up front so
-/// expiry stays deterministic and GET does not refresh observability state.
-///
-/// This 30-minute lifetime is an intentional exception to the bridge's usual
-/// uniform TTL: payloads still expire after `EXPIRE_AFTER_SECONDS`.
-const FLOW_EXPIRE_AFTER_SECONDS: u64 = EXPIRE_AFTER_SECONDS * 2;
+/// Covers the request wait, app processing, and response wait windows.
+const FLOW_EXPIRE_AFTER_SECONDS: u64 = EXPIRE_AFTER_SECONDS * 3;
 
 /// Opaque correlation identifier shared by the spans in one `IDKit` flow.
 ///
