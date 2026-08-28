@@ -4,11 +4,9 @@ use redis::{aio::ConnectionManager, AsyncCommands};
 use schemars::JsonSchema;
 use uuid::Uuid;
 
-use crate::utils::{
-    handle_redis_error, RequestPayload, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
-};
+use crate::utils::{handle_redis_error, RequestStatus, EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX};
 
-use super::RES_PREFIX;
+use super::{StoredResponse, RES_PREFIX};
 
 #[derive(Debug, serde::Serialize, JsonSchema)]
 pub(super) struct ResponseCreatedPayload {
@@ -19,7 +17,7 @@ pub(super) struct ResponseCreatedPayload {
 /// Create a standalone response without `IDKit` flow correlation.
 pub(super) async fn handler(
     Extension(mut redis): Extension<ConnectionManager>,
-    Json(request): Json<RequestPayload>,
+    Json(request): Json<StoredResponse>,
 ) -> Result<(StatusCode, Json<ResponseCreatedPayload>), StatusCode> {
     let request_id = Uuid::new_v4().to_string();
 

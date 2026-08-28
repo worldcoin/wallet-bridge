@@ -12,6 +12,7 @@ use http_body_util::BodyExt;
 use redis::aio::ConnectionManager;
 use serde_json::Value;
 use tower::ServiceExt;
+use world_id_bridge::analytics::Analytics;
 use world_id_bridge::app;
 use world_id_bridge::utils::{AppOverride, AppOverrides};
 
@@ -45,7 +46,29 @@ pub async fn redis_connection() -> ConnectionManager {
 
 /// Build the real bridge router, wired to a local Redis and the override fixture.
 pub async fn test_app() -> axum::Router {
-    app(redis_connection().await, Arc::new(fixture_overrides()))
+    let analytics_url = "http://127.0.0.1:1/analytics"
+        .parse()
+        .expect("test analytics URL must be valid");
+    let analytics = Analytics::new(analytics_url).expect("test analytics client must build");
+
+    app(
+        redis_connection().await,
+        Arc::new(fixture_overrides()),
+        Arc::new(analytics),
+    )
+}
+
+pub async fn test_app_with_analytics(callback_url: &str) -> axum::Router {
+    let url = callback_url
+        .parse()
+        .expect("test analytics URL must be valid");
+    let analytics = Analytics::new(url).expect("test analytics client must build");
+
+    app(
+        redis_connection().await,
+        Arc::new(fixture_overrides()),
+        Arc::new(analytics),
+    )
 }
 
 async fn send(
