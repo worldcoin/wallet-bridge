@@ -64,9 +64,7 @@ pub(super) async fn handler(
         return Err(StatusCode::CONFLICT);
     }
 
-    // The existing flow key was allocated for both handoff legs when the
-    // request was created. Do not refresh or rewrite it here: publishing the
-    // response must not race a consumer and recreate stale observability state.
+    // The response now represents completion, so the request status is no longer needed.
     redis
         .del::<_, ()>(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .await
