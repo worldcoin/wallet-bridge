@@ -1,6 +1,14 @@
+use std::{sync::Arc, time::Duration};
+
+use axum::{
+    extract::State, http::StatusCode, routing::post as axum_post, Json as AxumJson, Router,
+};
 use serde_json::{json, Value};
-use std::sync::Arc;
-use tokio::sync::Barrier;
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, Barrier},
+    task::JoinHandle,
+};
 use uuid::Uuid;
 
 use redis::AsyncCommands;
@@ -26,6 +34,47 @@ async fn redis_ttl(key: &str) -> i64 {
 }
 
 mod common;
+
+const ANALYTICS_PATH: &str = "/analytics";
+
+async fn record_analytics(
+    State(sender): State<mpsc::UnboundedSender<Value>>,
+    AxumJson(body): AxumJson<Value>,
+) -> StatusCode {
+    sender.send(body).expect("analytics receiver must be open");
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
+async fn start_analytics_recorder() -> (String, mpsc::UnboundedReceiver<Value>, JoinHandle<()>) {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let router = Router::new()
+        .route(ANALYTICS_PATH, axum_post(record_analytics))
+        .with_state(sender);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("analytics recorder must bind");
+    let address = listener
+        .local_addr()
+        .expect("analytics recorder must have an address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("analytics recorder must run");
+    });
+
+    (
+        format!("http://{address}{ANALYTICS_PATH}"),
+        receiver,
+        server,
+    )
+}
+
+async fn next_analytics_body(receiver: &mut mpsc::UnboundedReceiver<Value>) -> Value {
+    tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("analytics callback was not received")
+        .expect("analytics recorder closed unexpectedly")
+}
 
 /// Test the root endpoint returns service information
 #[tokio::test]
@@ -220,6 +269,45 @@ async fn test_get_response() {
     assert_eq!(json["status"], "completed");
     assert_eq!(json["response"]["iv"], "resp_iv");
     assert_eq!(json["response"]["payload"], "resp_payload");
+}
+
+#[tokio::test]
+async fn test_response_fetch_calls_analytics_url() {
+    let (callback_url, mut analytics_bodies, server) = start_analytics_recorder().await;
+    let app = common::test_app_with_analytics(&callback_url).await;
+
+    let (upload_status, upload_body) = common::post(
+        &app,
+        "/response",
+        &json!({
+            "iv": "response-iv",
+            "payload": "response-payload",
+            "tracking_receipt": "opaque-receipt"
+        }),
+    )
+    .await;
+    assert_eq!(upload_status, 201);
+    let upload: Value = serde_json::from_str(&upload_body).unwrap();
+    let response_url = format!("/response/{}", upload["request_id"].as_str().unwrap());
+
+    let (fetch_status, fetch_body) = common::get(&app, &response_url).await;
+    assert_eq!(fetch_status, 200);
+    let response: Value = serde_json::from_str(&fetch_body).unwrap();
+    assert_eq!(
+        response,
+        json!({
+            "status": "completed",
+            "response": {"iv": "response-iv", "payload": "response-payload"}
+        })
+    );
+    assert_eq!(
+        next_analytics_body(&mut analytics_bodies).await,
+        json!({"trackingReceipt": "opaque-receipt"})
+    );
+
+    let (second_fetch_status, _) = common::get(&app, &response_url).await;
+    assert_eq!(second_fetch_status, 404);
+    server.abort();
 }
 
 /// Test GET /response/:id returns pending status when response not yet submitted
