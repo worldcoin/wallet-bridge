@@ -34,7 +34,7 @@ fn fixture_overrides() -> AppOverrides {
     overrides
 }
 
-async fn redis_connection() -> ConnectionManager {
+pub async fn redis_connection() -> ConnectionManager {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let client = redis::Client::open(url).expect("REDIS_URL must be a valid Redis URL");
     ConnectionManager::new(client).await.expect(

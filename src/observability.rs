@@ -1,7 +1,7 @@
 //! Correlation helpers for tracing a message across bridge handoffs.
 //!
-//! Flow identifiers deliberately carry no timing or client data. They only
-//! connect bounded bridge spans and expire after a fixed correlation window.
+//! Records request/response create and consume spans and counters. Flow
+//! identifiers connect those spans so handoff latency can be measured.
 
 use std::fmt;
 
@@ -18,13 +18,8 @@ pub const FLOW_PREFIX: &str = "flow:";
 
 const IDKIT_FLOW_ID_PREFIX: &str = "idkitflow_";
 
-/// Flow correlation can span one full request TTL before consumption and one
-/// full response TTL afterward. Allocate both 15-minute legs up front so
-/// expiry stays deterministic and GET does not refresh observability state.
-///
-/// This 30-minute lifetime is an intentional exception to the bridge's usual
-/// uniform TTL: payloads still expire after `EXPIRE_AFTER_SECONDS`.
-const FLOW_EXPIRE_AFTER_SECONDS: u64 = EXPIRE_AFTER_SECONDS * 2;
+/// Covers the request wait, app processing, and response wait windows.
+const FLOW_EXPIRE_AFTER_SECONDS: u64 = EXPIRE_AFTER_SECONDS * 3;
 
 /// Opaque correlation identifier shared by the spans in one `IDKit` flow.
 ///
@@ -110,6 +105,25 @@ pub fn record_request_handoff(value: Option<&str>) -> Option<IdkitFlowId> {
     record_idkit_flow_id(&idkit_flow_id);
 
     Some(idkit_flow_id)
+}
+
+/// Record a response-side flow identifier when one exists.
+///
+/// Missing identifiers are expected for standalone and legacy response flows.
+/// Malformed identifiers are reported but never block payload delivery.
+pub fn record_response_handoff(value: Option<&str>) {
+    let Some(value) = value else {
+        return;
+    };
+    let Some(idkit_flow_id) = IdkitFlowId::from_redis(value) else {
+        tracing::warn!(
+            outcome = "flow_id_invalid",
+            operation = "response_handoff",
+            "Failed to observe IDKit flow ID"
+        );
+        return;
+    };
+    record_idkit_flow_id(&idkit_flow_id);
 }
 
 fn record_idkit_flow_id(idkit_flow_id: &IdkitFlowId) {
