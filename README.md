@@ -71,3 +71,45 @@ Integration tests build the bridge in-process and drive it directly, so the only
 docker-compose -f docker-compose.test.yml up -d
 cargo test
 ```
+
+## bridge-cli
+
+Install the Rust CLI from this checkout with `cargo install --path . --bin bridge-cli --locked`,
+or run it with `cargo run --bin bridge-cli -- --help`. Plain `cargo run` still starts the server.
+
+The CLI sends **already-encrypted** JSON envelopes containing exactly two string fields:
+`iv` and `payload`. It does not encrypt or decrypt messages. Supply an envelope file with
+`--input ciphertext.json`, or pipe it through stdin (the default, also `--input -`).
+
+```bash
+# Create a request; stdout contains {"request_id":"..."}.
+bridge-cli create request --input ciphertext.json
+# Optionally choose a high-entropy ID with --id.
+bridge-cli create request --input ciphertext.json --id "$REQUEST_ID"
+
+# Check without consuming, then retrieve once.
+bridge-cli head request "$REQUEST_ID"
+bridge-cli get request "$REQUEST_ID"
+
+# Submit a response, then fetch its status and any available ciphertext.
+bridge-cli respond "$REQUEST_ID" --input encrypted-response.json
+bridge-cli get response "$REQUEST_ID"
+
+# Create a standalone response without a prior request.
+bridge-cli create response --input encrypted-response.json
+bridge-cli head response "$REQUEST_ID"
+```
+
+Set `BRIDGE_URL` or pass `--url https://your-bridge.example` (default:
+`http://127.0.0.1:8000`). URL path prefixes are supported. `--timeout` sets a positive
+HTTP timeout in seconds (default: 30). Redirects and automatic retries are disabled.
+
+Successful response bodies go to stdout unchanged, followed by a newline; empty bodies
+produce no output. `head` prints the HTTP status code. Errors go to stderr and exit
+nonzero (including HTTP 404); argument errors exit 2. Successful commands exit 0.
+`get response` returns the server's pending status immediately when no response exists yet.
+**GET consumes any available message**, so avoid running it merely to inspect existence.
+The CLI does not expose the staging-only request upsert or app-specific capabilities.
+
+CLI HTTP tests use a local mock server and need no Redis:
+`cargo test --test bridge_cli`.
