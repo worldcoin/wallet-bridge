@@ -1,5 +1,8 @@
 #![deny(clippy::all, clippy::pedantic, clippy::nursery)]
 
+#[path = "bridge-cli/high_level.rs"]
+mod high_level;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::{Client, Method, Url};
 use std::{
@@ -13,13 +16,13 @@ use world_id_bridge::utils::validate_request_id;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Send and consume opaque, already-encrypted bridge messages"
+    about = "Send encrypted messages and receive replies through the bridge"
 )]
 struct Args {
     #[arg(
         long,
         env = "BRIDGE_URL",
-        default_value = "http://127.0.0.1:8000",
+        default_value = "https://staging-bridge.worldcoin.org",
         global = true
     )]
     url: Url,
@@ -46,6 +49,12 @@ impl Resource {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Encrypt a message/file and create a request; print connection details as JSON.
+    Send(high_level::Send),
+    /// Retrieve and decrypt a request or response once.
+    Receive(high_level::Receive),
+    /// Encrypt a message/file and reply to an existing request.
+    Reply(high_level::Reply),
     /// Create a request or standalone response from ciphertext JSON.
     Create {
         resource: Resource,
@@ -119,7 +128,19 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("bridge URL must be HTTP(S), without credentials, query or fragment".into());
     }
-    let (method, resource, id, body) = match args.command {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(args.timeout))
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .build()?;
+    let command = match args.command {
+        Command::Send(send) => return high_level::send(&client, &url, send).await,
+        Command::Receive(receive) => return high_level::receive(&client, &url, receive).await,
+        Command::Reply(reply) => return high_level::reply(&client, &url, reply).await,
+        command => command,
+    };
+    let (method, resource, id, body) = match command {
+        Command::Send(_) | Command::Receive(_) | Command::Reply(_) => unreachable!(),
         Command::Create {
             resource,
             input,
@@ -150,11 +171,6 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         id.map_or_else(String::new, |id| format!("/{id}"))
     ));
     let head = method == Method::HEAD;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(args.timeout))
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .build()?;
     let mut request = client.request(method, url);
     if let Some(body) = body {
         request = request

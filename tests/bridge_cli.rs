@@ -7,6 +7,8 @@ use std::{
 
 fn invoke(args: &[&str], input: &str) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_bridge-cli"))
+        .env_remove("BRIDGE_KEY")
+        .env_remove("BRIDGE_URL")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -163,4 +165,91 @@ fn invalid_input_fails_before_network_io() {
         assert!(output.stdout.is_empty());
         assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-invalid-json"));
     }
+}
+
+#[test]
+fn high_level_encrypts_and_decrypts_messages() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let key = STANDARD.encode([7; 32]);
+    let (output, request) = exchange(
+        &["send", "--key", &key, "--message", "hello plaintext"],
+        "",
+        "200 OK",
+        r#"{"request_id":"abcdef0123456789"}"#,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!request.contains("hello plaintext"));
+    assert!(!request.contains(&key));
+    let details: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(details["key"], key);
+    let envelope = request.split("\r\n\r\n").nth(1).unwrap();
+    let (received, _) = exchange(
+        &["receive", "request", "abcdef0123456789", "--key", &key],
+        "",
+        "200 OK",
+        envelope,
+    );
+    assert!(received.status.success());
+    assert_eq!(received.stdout, b"hello plaintext");
+    let (replied, reply_request) = exchange(
+        &["reply", "abcdef0123456789", "--key", &key],
+        "reply from stdin\n",
+        "201 Created",
+        "",
+    );
+    assert!(replied.status.success());
+    assert!(!reply_request.contains("reply from stdin"));
+    let reply_body: serde_json::Value =
+        serde_json::from_str(reply_request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let response = serde_json::json!({"status":"completed","response":reply_body}).to_string();
+    let (received, _) = exchange(
+        &["receive", "response", "abcdef0123456789", "--key", &key],
+        "",
+        "200 OK",
+        &response,
+    );
+    assert!(received.status.success());
+    assert_eq!(received.stdout, b"reply from stdin\n");
+    let (pending, _) = exchange(
+        &["receive", "response", "abcdef0123456789", "--key", &key],
+        "",
+        "200 OK",
+        r#"{"status":"initialized","response":null}"#,
+    );
+    assert!(!pending.status.success());
+    assert!(pending.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&pending.stderr).contains("not ready"));
+}
+
+#[test]
+fn high_level_file_input_and_generated_key() {
+    let path = std::env::temp_dir().join(format!("bridge-cli-{}.bin", uuid::Uuid::new_v4()));
+    std::fs::write(&path, b"file bytes\0\xff").unwrap();
+    let (output, request) = exchange(
+        &["send", "--input", path.to_str().unwrap()],
+        "",
+        "200 OK",
+        r#"{"request_id":"abcdef0123456789"}"#,
+    );
+    std::fs::remove_file(path).unwrap();
+    assert!(output.status.success());
+    let details: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let (received, _) = exchange(
+        &[
+            "receive",
+            "request",
+            "abcdef0123456789",
+            "--key",
+            details["key"].as_str().unwrap(),
+        ],
+        "",
+        "200 OK",
+        request.split("\r\n\r\n").nth(1).unwrap(),
+    );
+    assert!(received.status.success());
+    assert_eq!(received.stdout, b"file bytes\0\xff");
 }
