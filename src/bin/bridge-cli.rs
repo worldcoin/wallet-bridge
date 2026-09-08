@@ -129,6 +129,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return Err("bridge URL must be HTTP(S), without credentials, query or fragment".into());
     }
     let client = Client::builder()
+        .user_agent(concat!("bridge-cli/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(args.timeout))
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())

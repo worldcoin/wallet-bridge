@@ -64,7 +64,12 @@ fn exchange(
     let mut all_args = vec!["--url", &url];
     all_args.extend_from_slice(args);
     let output = invoke(&all_args, input);
-    (output, server.join().unwrap())
+    let request = server.join().unwrap();
+    assert!(request.to_lowercase().contains(concat!(
+        "user-agent: bridge-cli/",
+        env!("CARGO_PKG_VERSION")
+    )));
+    (output, request)
 }
 
 #[test]
