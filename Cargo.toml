@@ -4,11 +4,16 @@ edition = "2021"
 version = "0.1.0"
 name = "world-id-bridge"
 publish = false
+default-run = "world-id-bridge"
 authors = ["Miguel Piedrafita <rust@miguel.build>"]
 repository = "https://github.com/worldcoin/wallet-bridge"
 description = "A dumb, environment and client agnostic relay of arbitrary messages. It lets two parties share an arbitrary message where parties can gossip a symmetric key off-band"
 
 [dependencies]
+base64 = "0.22"
+ring = "0.17"
+clap = { version = "4.5", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 aide = { version = "0.13.2", features = ["axum", "scalar"] }
 axum = "0.7.9"
 axum-jsonschema = { version = "0.8.0", features = ["aide"] }

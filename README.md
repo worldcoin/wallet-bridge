@@ -71,3 +71,84 @@ Integration tests build the bridge in-process and drive it directly, so the only
 docker-compose -f docker-compose.test.yml up -d
 cargo test
 ```
+
+## bridge-cli
+
+Install with `cargo install --path . --bin bridge-cli --locked`, or run
+`cargo run --bin bridge-cli -- --help`. Plain `cargo run` starts the server.
+
+### Send a message or file
+
+```bash
+bridge-cli send --message 'Hello from my terminal'
+bridge-cli send --input message.json
+cat message.json | bridge-cli send
+```
+
+`send` encrypts the input locally and creates a request. It prints JSON containing
+`request_id`, `key`, and `bridge_url`. Share these connection details with the respondent
+through a trusted channel: the key is secret and is never sent to the bridge.
+An optional `--key` (or `BRIDGE_KEY`) reuses an existing base64-encoded 32-byte key.
+Otherwise the CLI generates a fresh AES-256 key.
+
+### Receive and reply
+
+Use the ID and key returned by `send`, with the same bridge URL on both sides:
+
+```bash
+export BRIDGE_KEY='<key from send>'
+REQUEST_ID='<request_id from send>'
+
+# Respondent: decrypt the request to stdout, then send an encrypted reply.
+bridge-cli receive request "$REQUEST_ID"
+bridge-cli reply "$REQUEST_ID" --message 'Message received'
+# Or: bridge-cli reply "$REQUEST_ID" --input reply.json
+
+# Sender: decrypt the reply to stdout.
+bridge-cli receive response "$REQUEST_ID"
+```
+
+Plaintext can be any bytes, including a JSON document; the CLI preserves file/stdin
+contents and writes decrypted bytes without adding a newline. Both `send` and `reply`
+accept `--message`, `--input FILE`, or stdin (default, also `--input -`). Inline messages
+and keys may appear in shell history; file/stdin and `BRIDGE_KEY` avoid literal shell arguments.
+
+Encryption matches the existing bridge client envelope: AES-256-GCM, a fresh random
+12-byte IV per message, no associated data, and standard base64 `iv` and `payload`
+fields. The payload includes the 16-byte authentication tag. The server remains an
+opaque relay; encryption and decryption happen only in the CLI.
+
+### Deployment and single-use behavior
+
+The default is **staging**, `https://staging-bridge.worldcoin.org`.
+Use `--url https://bridge.worldcoin.org` for production, or set `BRIDGE_URL`.
+An explicit `--url` overrides the environment variable. Custom URLs and path prefixes
+are supported; use `--url http://127.0.0.1:8000` for local development.
+`--timeout` sets a positive HTTP timeout in seconds (default: 30).
+Redirects and automatic retries are disabled.
+
+**Receiving consumes the message**, even if you supply the wrong key. Check existence
+without consuming using `bridge-cli head request "$REQUEST_ID"` or `head response`.
+If a response is pending, `receive response` reports that on stderr and exits nonzero;
+run it again when the respondent has replied. Messages expire according to the bridge TTL
+(currently 15 minutes). The CLI does not save keys or messages automatically.
+
+### Low-level commands
+
+For already-encrypted envelopes with exactly string `iv` and `payload` fields:
+
+```bash
+bridge-cli create request --input ciphertext.json
+bridge-cli create request --input ciphertext.json --id "$REQUEST_ID"
+bridge-cli create response --input ciphertext.json
+bridge-cli get request "$REQUEST_ID"
+bridge-cli get response "$REQUEST_ID"
+bridge-cli respond "$REQUEST_ID" --input ciphertext.json
+```
+
+These return raw server bodies followed by a newline; empty bodies produce no output.
+`head` prints the HTTP status code. Errors go to stderr and exit nonzero, argument errors
+exit 2, and success exits 0. Low-level `get response` prints pending status as returned
+by the server. The CLI does not expose staging-only request upsert or app-specific capabilities.
+
+CLI HTTP tests use local mock servers and need no Redis: `cargo test --test bridge_cli`.
