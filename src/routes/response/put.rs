@@ -7,12 +7,12 @@ use redis::{aio::ConnectionManager, AsyncCommands, ExistenceCheck, SetExpiry, Se
 use crate::{
     observability,
     utils::{
-        handle_redis_error, validate_request_id, RequestPayload, RequestStatus,
-        EXPIRE_AFTER_SECONDS, REQ_STATUS_PREFIX,
+        handle_redis_error, validate_request_id, RequestStatus, EXPIRE_AFTER_SECONDS,
+        REQ_STATUS_PREFIX,
     },
 };
 
-use super::RES_PREFIX;
+use super::{StoredResponse, RES_PREFIX};
 
 #[tracing::instrument(
     parent = None,
@@ -26,7 +26,7 @@ use super::RES_PREFIX;
 pub(super) async fn handler(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
-    Json(request): Json<RequestPayload>,
+    Json(request): Json<StoredResponse>,
 ) -> Result<StatusCode, StatusCode> {
     let request_id = request_id.to_lowercase();
     validate_request_id(&request_id)?;

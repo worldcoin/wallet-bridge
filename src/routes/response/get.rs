@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
 use axum::{extract::Path, http::StatusCode, Extension};
 use axum_jsonschema::Json;
@@ -6,13 +6,14 @@ use redis::aio::ConnectionManager;
 use schemars::JsonSchema;
 
 use crate::{
+    analytics::Analytics,
     observability,
     utils::{
         handle_redis_error, validate_request_id, RequestPayload, RequestStatus, REQ_STATUS_PREFIX,
     },
 };
 
-use super::RES_PREFIX;
+use super::{StoredResponse, RES_PREFIX};
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
 pub(super) struct Response {
@@ -32,6 +33,7 @@ pub(super) struct Response {
 pub(super) async fn handler(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
+    Extension(analytics): Extension<Arc<Analytics>>,
 ) -> Result<Json<Response>, StatusCode> {
     let request_id = request_id.to_lowercase();
     validate_request_id(&request_id)?;
@@ -52,7 +54,7 @@ pub(super) async fn handler(
     observability::record_response_handoff(flow.as_deref());
 
     if let Some(value) = value {
-        let response =
+        let stored_response: StoredResponse =
             serde_json::from_slice(&value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         // Cleanup is best effort after GETDEL: the correlation key has a
@@ -73,8 +75,12 @@ pub(super) async fn handler(
         telemetry_batteries::reexports::metrics::counter!("message_bridge.response_consumed")
             .increment(1);
 
+        if let Some(tracking_receipt) = stored_response.tracking_receipt {
+            analytics.send_response_fetched_event(tracking_receipt);
+        }
+
         return Ok(Json(Response {
-            response,
+            response: Some(stored_response.payload),
             status: RequestStatus::Completed,
         }));
     }

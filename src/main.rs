@@ -5,6 +5,7 @@ use redis::aio::ConnectionManager;
 use std::env;
 use std::sync::Arc;
 
+use world_id_bridge::analytics::Analytics;
 use world_id_bridge::utils::AppOverrides;
 
 #[tokio::main]
@@ -50,8 +51,17 @@ async fn main() {
     tracing::info!("✅ Connection to Redis established.");
 
     let app_overrides = Arc::new(load_app_overrides());
+    let analytics = Arc::new(load_analytics());
 
-    world_id_bridge::server::start(redis, app_overrides).await;
+    world_id_bridge::server::start(redis, app_overrides, analytics).await;
+}
+
+fn load_analytics() -> Analytics {
+    let url = env::var("ANALYTICS_CALLBACK_URL")
+        .expect("ANALYTICS_CALLBACK_URL is required")
+        .parse()
+        .expect("ANALYTICS_CALLBACK_URL must be a valid URL");
+    Analytics::new(url).expect("Failed to build analytics client")
 }
 
 /// Load the per-`app_id` URL override map from the `APP_URL_OVERRIDES` env var.

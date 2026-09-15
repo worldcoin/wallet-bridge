@@ -3,7 +3,7 @@ use std::{env, net::SocketAddr, sync::Arc};
 use redis::aio::ConnectionManager;
 use tokio::{net::TcpListener, signal};
 
-use crate::utils::AppOverrides;
+use crate::{analytics::Analytics, utils::AppOverrides};
 
 /// Bind the configured address and serve the bridge until a shutdown signal.
 ///
@@ -11,8 +11,12 @@ use crate::utils::AppOverrides;
 ///
 /// Panics if `PORT` is set but not parseable as a port, if binding the TCP
 /// listener fails, or if the server exits with an error.
-pub async fn start(redis: ConnectionManager, app_overrides: Arc<AppOverrides>) {
-    let router = crate::app(redis, app_overrides);
+pub async fn start(
+    redis: ConnectionManager,
+    app_overrides: Arc<AppOverrides>,
+    analytics: Arc<Analytics>,
+) {
+    let router = crate::app(redis, app_overrides, analytics);
 
     let address = SocketAddr::from((
         [0, 0, 0, 0],

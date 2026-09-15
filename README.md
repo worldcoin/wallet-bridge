@@ -37,6 +37,12 @@ Bridge ->> IDKit: <response>
 - `POST /response`: Called by a client to create a standalone response without a prior request (see [Standalone Response Flow](#standalone-response-flow)).
 - `PUT /request/:id`: Staging only (`ENVIRONMENT == "staging"`). Idempotent request upsert.
 
+Response uploads may include an optional `tracking_receipt` alongside `iv` and
+`payload`. The receipt remains opaque, expires with the response, and is never
+returned to the response consumer. The bridge sends the receipt to the required
+`ANALYTICS_CALLBACK_URL` after the response is dequeued and decoded. Analytics
+delivery is best-effort and never blocks response delivery.
+
 ### Standalone Response Flow
 
 This flow allows a client to send a `/response` without first generating a `/request` first.
