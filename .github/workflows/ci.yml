@@ -76,7 +76,12 @@ jobs:
 
       - name: Run Docker container
         run: |
-          docker run -d --network host --env-file .env.example --name world-id-bridge-ci-container world-id-bridge-ci:latest
+          # Exercise the deployed telemetry initialization path during startup.
+          docker run -d --network host --env-file .env.example \
+            -e TELEMETRY_PRESET=datadog \
+            -e TELEMETRY_SERVICE_NAME=wallet-bridge \
+            -e TELEMETRY_DATADOG_ENDPOINT=http://localhost:8126 \
+            --name world-id-bridge-ci-container world-id-bridge-ci:latest
 
           # Wait for the application to start
           sleep 10

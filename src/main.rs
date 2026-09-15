@@ -12,6 +12,11 @@ use world_id_bridge::utils::AppOverrides;
 async fn main() {
     dotenv().ok();
 
+    // Telemetry also builds a Rustls HTTP client, so install the provider first.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls ring crypto provider");
+
     let _telemetry_guard = telemetry_batteries::init().expect("Failed to initialize telemetry");
 
     tracing::info!("Starting message bridge...");
@@ -32,11 +37,6 @@ async fn main() {
             if use_tls { "rediss" } else { "redis" }
         )
     });
-
-    // Rustls is used for Redis TLS
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls ring crypto provider");
 
     tracing::info!("Attempting to connect to Redis...");
 
