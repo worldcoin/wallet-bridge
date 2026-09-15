@@ -1,7 +1,9 @@
 //! Correlation helpers for tracing a message across bridge handoffs.
 //!
 //! Records request/response create and consume spans and counters. Flow
-//! identifiers connect those spans so handoff latency can be measured.
+//! identifiers connect those spans so handoff latency can be measured. A
+//! client-reported `slo_metric` flag is relayed onto those counters as a
+//! `slo_metric:{bool}` tag, uninterpreted.
 
 use std::fmt;
 
@@ -58,6 +60,87 @@ impl fmt::Display for IdkitFlowId {
 #[must_use]
 pub fn flow_key(request_id: &str) -> String {
     format!("{FLOW_PREFIX}{request_id}")
+}
+
+/// Redis namespace carrying the `slo_metric` flag between legs.
+const SLO_METRIC_PREFIX: &str = "slo_metric:";
+
+#[must_use]
+pub fn slo_metric_key(request_id: &str) -> String {
+    format!("{SLO_METRIC_PREFIX}{request_id}")
+}
+
+/// Write-only-if-true: absence means "not in cohort". Best-effort — a write
+/// failure just degrades the `slo_metric` tag to `false` for this flow.
+pub async fn store_slo_metric_flag(
+    redis: &mut ConnectionManager,
+    request_id: &str,
+    in_cohort: bool,
+) {
+    if !in_cohort {
+        return;
+    }
+    if let Err(error) = redis
+        .set_ex::<_, _, ()>(slo_metric_key(request_id), "1", FLOW_EXPIRE_AFTER_SECONDS)
+        .await
+    {
+        tracing::warn!(
+            outcome = "slo_metric_write_failed",
+            operation = "request_handoff",
+            "Failed to persist slo_metric cohort flag: {error}"
+        );
+    }
+}
+
+/// Render the `slo_metric` tag value for a `message_bridge.*` counter.
+#[must_use]
+pub const fn slo_metric_tag(in_cohort: bool) -> &'static str {
+    if in_cohort {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+/// Redis namespace carrying the client's `platform` between legs.
+const PLATFORM_PREFIX: &str = "platform:";
+
+#[must_use]
+pub fn platform_key(request_id: &str) -> String {
+    format!("{PLATFORM_PREFIX}{request_id}")
+}
+
+/// Best-effort — a write failure just degrades the `platform` tag to
+/// `unknown` for this flow.
+pub async fn store_platform(
+    redis: &mut ConnectionManager,
+    request_id: &str,
+    platform: Option<&str>,
+) {
+    let Some(platform) = platform else {
+        return;
+    };
+    if let Err(error) = redis
+        .set_ex::<_, _, ()>(
+            platform_key(request_id),
+            platform,
+            FLOW_EXPIRE_AFTER_SECONDS,
+        )
+        .await
+    {
+        tracing::warn!(
+            outcome = "platform_write_failed",
+            operation = "request_handoff",
+            "Failed to persist platform: {error}"
+        );
+    }
+}
+
+/// Render the `platform` tag value for a `message_bridge.*` counter. Owned
+/// because the counter macro's tag values must outlive the request.
+#[must_use]
+pub fn platform_tag(platform: Option<&str>) -> String {
+    platform.unwrap_or("unknown").to_string()
 }
 
 /// Mint and persist a flow identifier for a newly created request.
@@ -148,5 +231,17 @@ mod tests {
             Some(flow_id.clone())
         );
         assert!(IdkitFlowId::from_redis("not-a-flow-id").is_none());
+    }
+
+    #[test]
+    fn slo_metric_tag_reflects_cohort_membership() {
+        assert_eq!(slo_metric_tag(true), "true");
+        assert_eq!(slo_metric_tag(false), "false");
+    }
+
+    #[test]
+    fn platform_tag_falls_back_to_unknown() {
+        assert_eq!(platform_tag(Some("ios")), "ios");
+        assert_eq!(platform_tag(None), "unknown");
     }
 }

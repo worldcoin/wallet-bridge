@@ -25,6 +25,30 @@ async fn redis_ttl(key: &str) -> i64 {
         .expect("read Redis TTL")
 }
 
+fn slo_metric_key(request_id: &str) -> String {
+    format!("slo_metric:{request_id}")
+}
+
+async fn is_in_slo_metric_cohort(request_id: &str) -> bool {
+    common::redis_connection()
+        .await
+        .exists(slo_metric_key(request_id))
+        .await
+        .expect("read slo_metric cohort flag")
+}
+
+fn platform_key(request_id: &str) -> String {
+    format!("platform:{request_id}")
+}
+
+async fn platform(request_id: &str) -> Option<String> {
+    common::redis_connection()
+        .await
+        .get(platform_key(request_id))
+        .await
+        .expect("read platform")
+}
+
 mod common;
 
 /// Test the root endpoint returns service information
@@ -904,5 +928,101 @@ async fn test_standalone_response_does_not_create_idkit_flow_id() {
     assert!(
         flow_id(request_id).await.is_none(),
         "standalone response flows stay outside WDP85 tracing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `slo_metric` / `platform`: opaque client fields relayed onto
+// message_bridge.* counters.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_slo_metric_and_platform_default_to_absent_and_are_never_persisted() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "cohort-default-iv",
+        "payload": "cohort-default-payload",
+    });
+
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+    assert!(
+        !is_in_slo_metric_cohort(&request_id).await,
+        "omitting is_slo_metric must not enroll the flow in the cohort"
+    );
+    assert_eq!(
+        platform(&request_id).await,
+        None,
+        "omitting platform must not persist one"
+    );
+
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
+    assert!(!is_in_slo_metric_cohort(&request_id).await);
+    assert_eq!(platform(&request_id).await, None);
+
+    let response = json!({
+        "iv": "cohort-default-response-iv",
+        "payload": "cohort-default-response-payload",
+    });
+    let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
+    assert_eq!(status, 201, "response creation failed: {body}");
+    assert!(!is_in_slo_metric_cohort(&request_id).await);
+    assert_eq!(platform(&request_id).await, None);
+}
+
+#[tokio::test]
+async fn test_slo_metric_and_platform_persist_through_the_flow_and_are_cleaned_up() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "cohort-opt-in-iv",
+        "payload": "cohort-opt-in-payload",
+        "is_slo_metric": true,
+        "platform": "ios",
+    });
+
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+    assert!(
+        is_in_slo_metric_cohort(&request_id).await,
+        "is_slo_metric: true must enroll the flow in the cohort"
+    );
+    assert_eq!(platform(&request_id).await.as_deref(), Some("ios"));
+
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
+    assert!(
+        is_in_slo_metric_cohort(&request_id).await,
+        "request consumption must not consume the cohort flag"
+    );
+    assert_eq!(platform(&request_id).await.as_deref(), Some("ios"));
+
+    let response = json!({
+        "iv": "cohort-opt-in-response-iv",
+        "payload": "cohort-opt-in-response-payload",
+    });
+    let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
+    assert_eq!(status, 201, "response creation failed: {body}");
+    assert!(
+        is_in_slo_metric_cohort(&request_id).await,
+        "response creation must not consume the cohort flag"
+    );
+    assert_eq!(platform(&request_id).await.as_deref(), Some("ios"));
+
+    let (status, body) = common::get(&app, &format!("/response/{request_id}")).await;
+    assert_eq!(status, 200, "response consumption failed: {body}");
+    let _: Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        !is_in_slo_metric_cohort(&request_id).await,
+        "the cohort flag is cleaned up once the response is delivered, like the flow ID"
+    );
+    assert_eq!(
+        platform(&request_id).await,
+        None,
+        "platform is cleaned up once the response is delivered, like the flow ID"
     );
 }

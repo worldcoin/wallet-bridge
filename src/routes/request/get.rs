@@ -57,9 +57,16 @@ pub(super) async fn handler(
     let mut pipe = redis::pipe();
     pipe.atomic()
         .get_del(format!("{REQ_PREFIX}{request_id}"))
-        .get(observability::flow_key(&request_id));
+        .get(observability::flow_key(&request_id))
+        .get(observability::slo_metric_key(&request_id))
+        .get(observability::platform_key(&request_id));
 
-    let (value, idkit_flow_id): (Option<Vec<u8>>, Option<String>) = pipe
+    let (value, idkit_flow_id, slo_metric, platform): (
+        Option<Vec<u8>>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = pipe
         .query_async(&mut redis)
         .await
         .map_err(handle_redis_error)?;
@@ -79,8 +86,12 @@ pub(super) async fn handler(
 
     let idkit_flow_id = observability::record_request_handoff(idkit_flow_id.as_deref());
 
-    telemetry_batteries::reexports::metrics::counter!("message_bridge.request_consumed")
-        .increment(1);
+    telemetry_batteries::reexports::metrics::counter!(
+        "message_bridge.request_consumed",
+        "slo_metric" => observability::slo_metric_tag(slo_metric.is_some()),
+        "platform" => observability::platform_tag(platform.as_deref())
+    )
+    .increment(1);
 
     Ok(Json(RequestResponse {
         iv: payload.iv,

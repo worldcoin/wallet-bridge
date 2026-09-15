@@ -20,6 +20,16 @@ pub(super) struct Response {
     response: Option<RequestPayload>,
 }
 
+/// (status, response payload, flow ID, `slo_metric` flag, platform), as
+/// read from Redis.
+type PollResult = (
+    Option<String>,
+    Option<Vec<u8>>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 #[tracing::instrument(
     parent = None,
     name = "message_bridge.response.consume",
@@ -42,9 +52,11 @@ pub(super) async fn handler(
     pipe.atomic()
         .get(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .get_del(format!("{RES_PREFIX}{request_id}"))
-        .get(observability::flow_key(&request_id));
+        .get(observability::flow_key(&request_id))
+        .get(observability::slo_metric_key(&request_id))
+        .get(observability::platform_key(&request_id));
 
-    let (status, value, flow): (Option<String>, Option<Vec<u8>>, Option<String>) = pipe
+    let (status, value, flow, slo_metric, platform): PollResult = pipe
         .query_async(&mut redis)
         .await
         .map_err(handle_redis_error)?;
@@ -61,8 +73,14 @@ pub(super) async fn handler(
         cleanup
             .atomic()
             .del(format!("{REQ_STATUS_PREFIX}{request_id}"))
-            .del(observability::flow_key(&request_id));
-        if cleanup.query_async::<(u64, u64)>(&mut redis).await.is_err() {
+            .del(observability::flow_key(&request_id))
+            .del(observability::slo_metric_key(&request_id))
+            .del(observability::platform_key(&request_id));
+        if cleanup
+            .query_async::<(u64, u64, u64, u64)>(&mut redis)
+            .await
+            .is_err()
+        {
             tracing::warn!(
                 outcome = "flow_id_cleanup_failed",
                 operation = "response_handoff",
@@ -70,8 +88,12 @@ pub(super) async fn handler(
             );
         }
 
-        telemetry_batteries::reexports::metrics::counter!("message_bridge.response_consumed")
-            .increment(1);
+        telemetry_batteries::reexports::metrics::counter!(
+            "message_bridge.response_consumed",
+            "slo_metric" => observability::slo_metric_tag(slo_metric.is_some()),
+            "platform" => observability::platform_tag(platform.as_deref())
+        )
+        .increment(1);
 
         return Ok(Json(Response {
             response,
