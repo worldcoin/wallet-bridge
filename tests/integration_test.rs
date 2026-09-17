@@ -40,16 +40,16 @@ async fn supports_flow_telemetry(request_id: &str) -> Option<String> {
         .expect("read supports_flow_telemetry flag")
 }
 
-fn platform_key(request_id: &str) -> String {
-    format!("platform:{request_id}")
+fn client_name_key(request_id: &str) -> String {
+    format!("client_name:{request_id}")
 }
 
-async fn platform(request_id: &str) -> Option<String> {
+async fn client_name(request_id: &str) -> Option<String> {
     common::redis_connection()
         .await
-        .get(platform_key(request_id))
+        .get(client_name_key(request_id))
         .await
-        .expect("read platform")
+        .expect("read client_name")
 }
 
 mod common;
@@ -935,91 +935,91 @@ async fn test_standalone_response_does_not_create_idkit_flow_id() {
 }
 
 // ---------------------------------------------------------------------------
-// `supports_flow_telemetry` / `platform`: opaque client fields relayed onto
-// message_bridge.* counters.
+// `supports_flow_telemetry` / `client_name`: sourced entirely from headers
+// on GET /request/:id, since POST /request can't know either.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_supports_flow_telemetry_and_platform_default_to_false_and_unknown() {
+async fn test_post_request_never_sets_supports_flow_telemetry_or_client_name() {
     let app = common::test_app().await;
     let request_id = fresh_id();
     let request = json!({
         "request_id": request_id,
-        "iv": "cohort-default-iv",
-        "payload": "cohort-default-payload",
+        "iv": "post-only-iv",
+        "payload": "post-only-payload",
     });
-
     let (status, body) = common::post(&app, "/request", &request).await;
     assert_eq!(status, 200, "request creation failed: {body}");
     assert_eq!(
-        supports_flow_telemetry(&request_id).await.as_deref(),
-        Some("false"),
-        "omitting supports_flow_telemetry must store false, not leave the key unset"
+        supports_flow_telemetry(&request_id).await,
+        None,
+        "POST /request must never write this key — only GET does"
     );
-    assert_eq!(platform(&request_id).await.as_deref(), Some("unknown"));
+    assert_eq!(client_name(&request_id).await, None);
+}
+
+#[tokio::test]
+async fn test_get_request_without_headers_defaults_to_false_and_unknown() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "default-iv",
+        "payload": "default-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
 
     let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
     assert_eq!(status, 200, "request consumption failed: {body}");
     assert_eq!(
         supports_flow_telemetry(&request_id).await.as_deref(),
-        Some("false")
+        Some("false"),
+        "a missing header must still result in a stored, explicit false"
     );
-    assert_eq!(platform(&request_id).await.as_deref(), Some("unknown"));
-
-    let response = json!({
-        "iv": "cohort-default-response-iv",
-        "payload": "cohort-default-response-payload",
-    });
-    let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
-    assert_eq!(status, 201, "response creation failed: {body}");
-    assert_eq!(
-        supports_flow_telemetry(&request_id).await.as_deref(),
-        Some("false")
-    );
-    assert_eq!(platform(&request_id).await.as_deref(), Some("unknown"));
+    assert_eq!(client_name(&request_id).await.as_deref(), Some("unknown"));
 }
 
 #[tokio::test]
-async fn test_supports_flow_telemetry_and_platform_persist_through_the_flow_and_are_cleaned_up() {
+async fn test_get_request_headers_set_supports_flow_telemetry_and_client_name() {
     let app = common::test_app().await;
     let request_id = fresh_id();
     let request = json!({
         "request_id": request_id,
-        "iv": "cohort-opt-in-iv",
-        "payload": "cohort-opt-in-payload",
-        "supports_flow_telemetry": true,
-        "platform": "ios",
+        "iv": "get-header-iv",
+        "payload": "get-header-payload",
     });
-
     let (status, body) = common::post(&app, "/request", &request).await;
     assert_eq!(status, 200, "request creation failed: {body}");
+
+    let (status, body) = common::get_with_headers(
+        &app,
+        &format!("/request/{request_id}"),
+        &[
+            ("supports-flow-telemetry", "true"),
+            ("client-name", "android"),
+        ],
+    )
+    .await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
     assert_eq!(
         supports_flow_telemetry(&request_id).await.as_deref(),
         Some("true")
     );
-    assert_eq!(platform(&request_id).await.as_deref(), Some("ios"));
+    assert_eq!(client_name(&request_id).await.as_deref(), Some("android"));
 
-    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
-    assert_eq!(status, 200, "request consumption failed: {body}");
-    assert_eq!(
-        supports_flow_telemetry(&request_id).await.as_deref(),
-        Some("true"),
-        "request consumption must not consume the flag"
-    );
-    assert_eq!(platform(&request_id).await.as_deref(), Some("ios"));
-
+    // Carries forward to the response legs, same as the flow ID.
     let response = json!({
-        "iv": "cohort-opt-in-response-iv",
-        "payload": "cohort-opt-in-response-payload",
+        "iv": "get-header-response-iv",
+        "payload": "get-header-response-payload",
     });
-    let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
-    assert_eq!(status, 201, "response creation failed: {body}");
+    let (status, _) = common::put(&app, &format!("/response/{request_id}"), &response).await;
+    assert_eq!(status, 201);
     assert_eq!(
         supports_flow_telemetry(&request_id).await.as_deref(),
-        Some("true"),
-        "response creation must not consume the flag"
+        Some("true")
     );
-    assert_eq!(platform(&request_id).await.as_deref(), Some("ios"));
+    assert_eq!(client_name(&request_id).await.as_deref(), Some("android"));
 
     let (status, body) = common::get(&app, &format!("/response/{request_id}")).await;
     assert_eq!(status, 200, "response consumption failed: {body}");
@@ -1027,21 +1027,64 @@ async fn test_supports_flow_telemetry_and_platform_persist_through_the_flow_and_
     assert_eq!(
         supports_flow_telemetry(&request_id).await,
         None,
-        "the flag is cleaned up once the response is delivered, like the flow ID"
+        "cleaned up once the response is delivered, like the flow ID"
     );
+    assert_eq!(client_name(&request_id).await, None);
+}
+
+#[tokio::test]
+async fn test_get_request_header_present_but_not_true_is_an_explicit_false() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "explicit-false-iv",
+        "payload": "explicit-false-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    let (status, body) = common::get_with_headers(
+        &app,
+        &format!("/request/{request_id}"),
+        &[("supports-flow-telemetry", "nope")],
+    )
+    .await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
     assert_eq!(
-        platform(&request_id).await,
-        None,
-        "platform is cleaned up once the response is delivered, like the flow ID"
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("false")
     );
 }
 
 #[tokio::test]
-async fn test_supports_flow_telemetry_and_platform_do_not_leak_across_a_reused_request_id() {
-    // A client-supplied request_id can be reused once the original request
-    // expires. A stale true/platform from that earlier flow must never leak
-    // into a new one that doesn't opt in — the exact bug an always-write
-    // (rather than write-only-if-true) policy exists to close.
+async fn test_client_name_outside_the_fixed_vocabulary_is_bounded_to_invalid() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "invalid-client-name-iv",
+        "payload": "invalid-client-name-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    let (status, body) = common::get_with_headers(
+        &app,
+        &format!("/request/{request_id}"),
+        &[("client-name", "totally-not-a-real-client")],
+    )
+    .await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
+    assert_eq!(
+        client_name(&request_id).await.as_deref(),
+        Some("invalid"),
+        "an unrecognized client_name string must not be relayed verbatim as a metric tag"
+    );
+}
+
+#[tokio::test]
+async fn test_supports_flow_telemetry_and_client_name_do_not_leak_across_a_reused_request_id() {
     let app = common::test_app().await;
     let request_id = fresh_id();
 
@@ -1049,21 +1092,22 @@ async fn test_supports_flow_telemetry_and_platform_do_not_leak_across_a_reused_r
         "request_id": request_id,
         "iv": "reuse-first-iv",
         "payload": "reuse-first-payload",
-        "supports_flow_telemetry": true,
-        "platform": "ios",
     });
     let (status, body) = common::post(&app, "/request", &first).await;
     assert_eq!(status, 200, "first request creation failed: {body}");
+
+    let (status, body) = common::get_with_headers(
+        &app,
+        &format!("/request/{request_id}"),
+        &[("supports-flow-telemetry", "true"), ("client-name", "ios")],
+    )
+    .await;
+    assert_eq!(status, 200, "first request consumption failed: {body}");
     assert_eq!(
         supports_flow_telemetry(&request_id).await.as_deref(),
         Some("true")
     );
-    assert_eq!(platform(&request_id).await.as_deref(), Some("ios"));
-
-    // Consume it so a second POST with the same id is accepted (NX would
-    // otherwise 409 while the first request's payload key still exists).
-    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
-    assert_eq!(status, 200, "first request consumption failed: {body}");
+    assert_eq!(client_name(&request_id).await.as_deref(), Some("ios"));
 
     let second = json!({
         "request_id": request_id,
@@ -1072,34 +1116,17 @@ async fn test_supports_flow_telemetry_and_platform_do_not_leak_across_a_reused_r
     });
     let (status, body) = common::post(&app, "/request", &second).await;
     assert_eq!(status, 200, "second request creation failed: {body}");
+
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(status, 200, "second request consumption failed: {body}");
     assert_eq!(
         supports_flow_telemetry(&request_id).await.as_deref(),
         Some("false"),
-        "the second flow's own (omitted) supports_flow_telemetry must overwrite the first flow's true"
+        "the second flow's own (header-less) fetch must overwrite the first flow's true"
     );
     assert_eq!(
-        platform(&request_id).await.as_deref(),
+        client_name(&request_id).await.as_deref(),
         Some("unknown"),
-        "the second flow's own (omitted) platform must overwrite the first flow's ios"
-    );
-}
-
-#[tokio::test]
-async fn test_platform_outside_the_fixed_vocabulary_is_bounded_to_invalid() {
-    let app = common::test_app().await;
-    let request_id = fresh_id();
-    let request = json!({
-        "request_id": request_id,
-        "iv": "invalid-platform-iv",
-        "payload": "invalid-platform-payload",
-        "platform": "totally-not-a-real-platform",
-    });
-
-    let (status, body) = common::post(&app, "/request", &request).await;
-    assert_eq!(status, 200, "request creation failed: {body}");
-    assert_eq!(
-        platform(&request_id).await.as_deref(),
-        Some("invalid"),
-        "an unrecognized platform string must not be relayed verbatim as a metric tag"
+        "the second flow's own (header-less) fetch must overwrite the first flow's ios"
     );
 }

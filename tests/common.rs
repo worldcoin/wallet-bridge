@@ -53,11 +53,11 @@ async fn send(
     method: Method,
     route: &str,
     body: Option<&Value>,
-    header: Option<(&str, &str)>,
+    headers: &[(&str, &str)],
 ) -> (u16, String) {
     let mut builder = Request::builder().uri(route).method(method);
-    if let Some((name, value)) = header {
-        builder = builder.header(name, value);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
     }
     let request = match body {
         Some(json) => builder
@@ -86,7 +86,7 @@ async fn send(
 }
 
 pub async fn get(app: &axum::Router, route: &str) -> (u16, String) {
-    send(app, Method::GET, route, None, None).await
+    send(app, Method::GET, route, None, &[]).await
 }
 
 pub async fn get_with_header(
@@ -95,13 +95,21 @@ pub async fn get_with_header(
     name: &str,
     value: &str,
 ) -> (u16, String) {
-    send(app, Method::GET, route, None, Some((name, value))).await
+    send(app, Method::GET, route, None, &[(name, value)]).await
+}
+
+pub async fn get_with_headers(
+    app: &axum::Router,
+    route: &str,
+    headers: &[(&str, &str)],
+) -> (u16, String) {
+    send(app, Method::GET, route, None, headers).await
 }
 
 pub async fn post(app: &axum::Router, route: &str, body: &Value) -> (u16, String) {
-    send(app, Method::POST, route, Some(body), None).await
+    send(app, Method::POST, route, Some(body), &[]).await
 }
 
 pub async fn put(app: &axum::Router, route: &str, body: &Value) -> (u16, String) {
-    send(app, Method::PUT, route, Some(body), None).await
+    send(app, Method::PUT, route, Some(body), &[]).await
 }

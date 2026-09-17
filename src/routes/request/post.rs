@@ -51,15 +51,6 @@ pub(super) struct CreateRequestBody {
     /// can never break them. Updated SDKs send `true` to receive overrides.
     #[serde(default)]
     supports_app_overrides: bool,
-    /// Opaque client-computed flag, relayed onto `message_bridge.*`
-    /// counters as a `supports_flow_telemetry:{bool}` tag without interpretation.
-    #[serde(default)]
-    supports_flow_telemetry: bool,
-    /// Opaque client-reported platform (e.g. `"ios"`, `"android"`), relayed
-    /// onto `message_bridge.*` counters as a `platform` tag without
-    /// interpretation. Absent ⇒ tagged `platform:unknown`.
-    #[serde(default)]
-    platform: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, JsonSchema)]
@@ -97,8 +88,6 @@ pub(super) async fn handler(
         payload,
         request_id,
         supports_app_overrides,
-        supports_flow_telemetry,
-        platform,
     } = body;
 
     let request_id = match request_id {
@@ -141,20 +130,10 @@ pub(super) async fn handler(
         tracing::warn!(outcome, "Failed to mint and store IDKit flow ID");
     }
 
-    observability::store_supports_flow_telemetry_flag(
-        &mut redis,
-        &request_id,
-        supports_flow_telemetry,
-    )
-    .await;
-    observability::store_platform(&mut redis, &request_id, platform.as_deref()).await;
-
-    telemetry_batteries::reexports::metrics::counter!(
-        "message_bridge.request_created",
-        "supports_flow_telemetry" => observability::supports_flow_telemetry_tag(supports_flow_telemetry),
-        "platform" => observability::platform_tag(platform.as_deref())
-    )
-    .increment(1);
+    // supports_flow_telemetry/client_name are reported on GET /request/:id
+    // instead — the RP calling POST has no way to know either.
+    telemetry_batteries::reexports::metrics::counter!("message_bridge.request_created")
+        .increment(1);
 
     Ok(Json(RequestCreatedPayload {
         request_id,

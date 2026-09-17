@@ -36,8 +36,8 @@ pub(super) async fn handler(
         .get(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .get(observability::flow_key(&request_id))
         .get(observability::supports_flow_telemetry_key(&request_id))
-        .get(observability::platform_key(&request_id));
-    let (status, flow, supports_flow_telemetry, platform): (
+        .get(observability::client_name_key(&request_id));
+    let (status, flow, supports_flow_telemetry, client_name): (
         Option<String>,
         Option<String>,
         Option<String>,
@@ -80,7 +80,7 @@ pub(super) async fn handler(
     telemetry_batteries::reexports::metrics::counter!(
         "message_bridge.response_created",
         "supports_flow_telemetry" => observability::supports_flow_telemetry_tag_from_stored(supports_flow_telemetry.as_deref()),
-        "platform" => observability::platform_tag_from_stored(platform.as_deref())
+        "client_name" => observability::client_name_tag_from_stored(client_name.as_deref())
     )
     .increment(1);
 

@@ -2,8 +2,8 @@
 //!
 //! Records request/response create and consume spans and counters. Flow
 //! identifiers connect those spans so handoff latency can be measured. A
-//! client-reported `supports_flow_telemetry` flag is relayed onto those counters as a
-//! `supports_flow_telemetry:{bool}` tag, uninterpreted.
+//! client-reported `supports_flow_telemetry` flag is relayed onto those
+//! counters as a `supports_flow_telemetry:{bool}` tag, uninterpreted.
 
 use std::fmt;
 
@@ -70,13 +70,8 @@ pub fn supports_flow_telemetry_key(request_id: &str) -> String {
     format!("{SUPPORTS_FLOW_TELEMETRY_PREFIX}{request_id}")
 }
 
-/// Persist the `supports_flow_telemetry` cohort membership for a request.
-///
-/// Always overwrites the key, even when `in_cohort` is `false`: a
-/// client-supplied `request_id` can be reused once the underlying request
-/// expires, and skipping the write on `false` would let a stale `true` from
-/// a previous flow at that same ID leak into the new one. Best-effort — a
-/// write failure just degrades the `supports_flow_telemetry` tag to `false` for this flow.
+/// Always overwrites, even when `false` — otherwise a stale `true` could
+/// leak into a reused `request_id`. Best-effort on write failure.
 pub async fn store_supports_flow_telemetry_flag(
     redis: &mut ConnectionManager,
     request_id: &str,
@@ -108,48 +103,41 @@ pub const fn supports_flow_telemetry_tag(in_cohort: bool) -> &'static str {
     }
 }
 
-/// Redis namespace carrying the client's `platform` between legs.
-const PLATFORM_PREFIX: &str = "platform:";
+/// Redis namespace carrying the client's `client_name` between legs.
+const CLIENT_NAME_PREFIX: &str = "client_name:";
 
 #[must_use]
-pub fn platform_key(request_id: &str) -> String {
-    format!("{PLATFORM_PREFIX}{request_id}")
+pub fn client_name_key(request_id: &str) -> String {
+    format!("{CLIENT_NAME_PREFIX}{request_id}")
 }
 
-/// Persist the (bounded) `platform` tag for a request.
-///
-/// Always overwrites the key, for the same reuse-safety reason as
-/// `store_supports_flow_telemetry_flag`. Best-effort — a write failure just degrades the
-/// `platform` tag to `unknown` for this flow.
-pub async fn store_platform(
+/// Same always-overwrite policy as `store_supports_flow_telemetry_flag`.
+pub async fn store_client_name(
     redis: &mut ConnectionManager,
     request_id: &str,
-    platform: Option<&str>,
+    client_name: Option<&str>,
 ) {
     if let Err(error) = redis
         .set_ex::<_, _, ()>(
-            platform_key(request_id),
-            platform_tag(platform),
+            client_name_key(request_id),
+            client_name_tag(client_name),
             FLOW_EXPIRE_AFTER_SECONDS,
         )
         .await
     {
         tracing::warn!(
-            outcome = "platform_write_failed",
+            outcome = "client_name_write_failed",
             operation = "request_handoff",
-            "Failed to persist platform: {error}"
+            "Failed to persist client_name: {error}"
         );
     }
 }
 
-/// Render the `platform` tag value for a `message_bridge.*` counter.
-///
-/// Collapses to a fixed vocabulary (`ios`/`android`/`unknown`/`invalid`)
-/// rather than relaying the client's string verbatim: an unbounded value
-/// would let a buggy or hostile caller blow up this metric's cardinality.
+/// Bounds the tag to a fixed vocabulary instead of relaying the client's
+/// string verbatim, which would let cardinality grow unbounded.
 #[must_use]
-pub fn platform_tag(platform: Option<&str>) -> &'static str {
-    match platform {
+pub fn client_name_tag(client_name: Option<&str>) -> &'static str {
+    match client_name {
         Some("ios") => "ios",
         Some("android") => "android",
         Some(_) => "invalid",
@@ -157,25 +145,16 @@ pub fn platform_tag(platform: Option<&str>) -> &'static str {
     }
 }
 
-/// Render the `supports_flow_telemetry` tag from a value read back out of Redis.
-///
-/// `store_supports_flow_telemetry_flag` always writes one of `supports_flow_telemetry_tag`'s own
-/// literals, so this just needs a `'static` reference to hand the counter
-/// macro instead of one borrowed from the Redis response; a missing key
-/// (e.g. a write failure) defaults to `false`, same as the origin leg.
+/// Same tag, computed from a value already read back out of Redis.
 #[must_use]
 pub fn supports_flow_telemetry_tag_from_stored(value: Option<&str>) -> &'static str {
     supports_flow_telemetry_tag(value == Some("true"))
 }
 
-/// Render the `platform` tag from a value read back out of Redis.
-///
-/// `store_platform` always writes one of `platform_tag`'s own literals
-/// (including `"unknown"` for an absent client value), so this matches
-/// those literals directly rather than re-deriving through `platform_tag`,
-/// which would otherwise fold a stored `"unknown"` into `"invalid"`.
+/// Matches the stored literal directly (rather than via `client_name_tag`,
+/// which would fold a stored `"unknown"` into `"invalid"`).
 #[must_use]
-pub fn platform_tag_from_stored(value: Option<&str>) -> &'static str {
+pub fn client_name_tag_from_stored(value: Option<&str>) -> &'static str {
     match value {
         Some("ios") => "ios",
         Some("android") => "android",
@@ -281,23 +260,23 @@ mod tests {
     }
 
     #[test]
-    fn platform_tag_recognizes_known_platforms() {
-        assert_eq!(platform_tag(Some("ios")), "ios");
-        assert_eq!(platform_tag(Some("android")), "android");
+    fn client_name_tag_recognizes_known_client_names() {
+        assert_eq!(client_name_tag(Some("ios")), "ios");
+        assert_eq!(client_name_tag(Some("android")), "android");
     }
 
     #[test]
-    fn platform_tag_falls_back_to_unknown_when_absent() {
-        assert_eq!(platform_tag(None), "unknown");
+    fn client_name_tag_falls_back_to_unknown_when_absent() {
+        assert_eq!(client_name_tag(None), "unknown");
     }
 
     #[test]
-    fn platform_tag_bounds_unrecognized_values_to_invalid() {
+    fn client_name_tag_bounds_unrecognized_values_to_invalid() {
         // Anything outside the fixed vocabulary must collapse to one value,
         // not be relayed verbatim — otherwise a buggy or hostile caller could
         // mint one metric time series per distinct string it sends.
-        assert_eq!(platform_tag(Some("iOS")), "invalid");
-        assert_eq!(platform_tag(Some("")), "invalid");
-        assert_eq!(platform_tag(Some("anything-else")), "invalid");
+        assert_eq!(client_name_tag(Some("iOS")), "invalid");
+        assert_eq!(client_name_tag(Some("")), "invalid");
+        assert_eq!(client_name_tag(Some("anything-else")), "invalid");
     }
 }
