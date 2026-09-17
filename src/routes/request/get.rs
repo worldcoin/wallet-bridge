@@ -25,6 +25,12 @@ use super::REQ_PREFIX;
 /// compatible.
 const ACCEPT_IDKIT_FLOW_ID_HEADER: &str = "accept-idkit-flow-id";
 
+/// Self-reported by the fetching client — the sole source of the
+/// `supports_flow_telemetry`/`client_name` tags, since `POST /request`
+/// can't know who, if anyone, will fetch its request.
+const CLIENT_NAME_HEADER: &str = "client-name";
+const SUPPORTS_FLOW_TELEMETRY_HEADER: &str = "supports-flow-telemetry";
+
 #[derive(Debug, serde::Serialize, JsonSchema)]
 pub(super) struct RequestResponse {
     /// The initialization vector for the encrypted payload.
@@ -79,8 +85,24 @@ pub(super) async fn handler(
 
     let idkit_flow_id = observability::record_request_handoff(idkit_flow_id.as_deref());
 
-    telemetry_batteries::reexports::metrics::counter!("message_bridge.request_consumed")
-        .increment(1);
+    let supports_flow_telemetry =
+        header_bool(&headers, SUPPORTS_FLOW_TELEMETRY_HEADER).unwrap_or(false);
+    let client_name = header_str(&headers, CLIENT_NAME_HEADER);
+
+    observability::store_supports_flow_telemetry_flag(
+        &mut redis,
+        &request_id,
+        supports_flow_telemetry,
+    )
+    .await;
+    observability::store_client_name(&mut redis, &request_id, client_name).await;
+
+    telemetry_batteries::reexports::metrics::counter!(
+        "message_bridge.request_consumed",
+        "supports_flow_telemetry" => observability::supports_flow_telemetry_tag(supports_flow_telemetry),
+        "client_name" => observability::client_name_tag(client_name)
+    )
+    .increment(1);
 
     Ok(Json(RequestResponse {
         iv: payload.iv,
@@ -96,4 +118,14 @@ fn accepts_idkit_flow_id(headers: &HeaderMap) -> bool {
         .get(ACCEPT_IDKIT_FLOW_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name)?.to_str().ok()
+}
+
+/// `None` only when the header is missing/non-UTF-8; present-but-not-`"true"`
+/// is a deliberate `Some(false)`.
+fn header_bool(headers: &HeaderMap, name: &str) -> Option<bool> {
+    header_str(headers, name).map(|value| value.eq_ignore_ascii_case("true"))
 }
