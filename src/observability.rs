@@ -140,6 +140,10 @@ pub fn client_name_tag(client_name: Option<&str>) -> &'static str {
     match client_name {
         Some("ios") => "ios",
         Some("android") => "android",
+        Some("ios-id") => "ios-id",
+        Some("android-id") => "android-id",
+        Some("ios-money") => "ios-money",
+        Some("android-money") => "android-money",
         Some(_) => "invalid",
         None => "unknown",
     }
@@ -158,6 +162,10 @@ pub fn client_name_tag_from_stored(value: Option<&str>) -> &'static str {
     match value {
         Some("ios") => "ios",
         Some("android") => "android",
+        Some("ios-id") => "ios-id",
+        Some("android-id") => "android-id",
+        Some("ios-money") => "ios-money",
+        Some("android-money") => "android-money",
         Some("invalid") => "invalid",
         _ => "unknown",
     }
@@ -263,6 +271,10 @@ mod tests {
     fn client_name_tag_recognizes_known_client_names() {
         assert_eq!(client_name_tag(Some("ios")), "ios");
         assert_eq!(client_name_tag(Some("android")), "android");
+        assert_eq!(client_name_tag(Some("ios-id")), "ios-id");
+        assert_eq!(client_name_tag(Some("android-id")), "android-id");
+        assert_eq!(client_name_tag(Some("ios-money")), "ios-money");
+        assert_eq!(client_name_tag(Some("android-money")), "android-money");
     }
 
     #[test]

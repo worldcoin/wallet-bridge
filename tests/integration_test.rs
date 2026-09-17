@@ -1084,6 +1084,33 @@ async fn test_client_name_outside_the_fixed_vocabulary_is_bounded_to_invalid() {
 }
 
 #[tokio::test]
+async fn test_client_name_recognizes_id_and_money_app_variants() {
+    for client_name_value in ["ios-id", "android-id", "ios-money", "android-money"] {
+        let app = common::test_app().await;
+        let request_id = fresh_id();
+        let request = json!({
+            "request_id": request_id,
+            "iv": "variant-client-name-iv",
+            "payload": "variant-client-name-payload",
+        });
+        let (status, body) = common::post(&app, "/request", &request).await;
+        assert_eq!(status, 200, "request creation failed: {body}");
+
+        let (status, body) = common::get_with_headers(
+            &app,
+            &format!("/request/{request_id}"),
+            &[("client-name", client_name_value)],
+        )
+        .await;
+        assert_eq!(status, 200, "request consumption failed: {body}");
+        assert_eq!(
+            client_name(&request_id).await.as_deref(),
+            Some(client_name_value)
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_supports_flow_telemetry_and_client_name_do_not_leak_across_a_reused_request_id() {
     let app = common::test_app().await;
     let request_id = fresh_id();
