@@ -70,24 +70,30 @@ pub fn slo_metric_key(request_id: &str) -> String {
     format!("{SLO_METRIC_PREFIX}{request_id}")
 }
 
-/// Write-only-if-true: absence means "not in cohort". Best-effort — a write
-/// failure just degrades the `slo_metric` tag to `false` for this flow.
+/// Persist the `slo_metric` cohort membership for a request.
+///
+/// Always overwrites the key, even when `in_cohort` is `false`: a
+/// client-supplied `request_id` can be reused once the underlying request
+/// expires, and skipping the write on `false` would let a stale `true` from
+/// a previous flow at that same ID leak into the new one. Best-effort — a
+/// write failure just degrades the `slo_metric` tag to `false` for this flow.
 pub async fn store_slo_metric_flag(
     redis: &mut ConnectionManager,
     request_id: &str,
     in_cohort: bool,
 ) {
-    if !in_cohort {
-        return;
-    }
     if let Err(error) = redis
-        .set_ex::<_, _, ()>(slo_metric_key(request_id), "1", FLOW_EXPIRE_AFTER_SECONDS)
+        .set_ex::<_, _, ()>(
+            slo_metric_key(request_id),
+            slo_metric_tag(in_cohort),
+            FLOW_EXPIRE_AFTER_SECONDS,
+        )
         .await
     {
         tracing::warn!(
             outcome = "slo_metric_write_failed",
             operation = "request_handoff",
-            "Failed to persist slo_metric cohort flag: {error}"
+            "Failed to persist slo_metric flag: {error}"
         );
     }
 }
@@ -110,20 +116,20 @@ pub fn platform_key(request_id: &str) -> String {
     format!("{PLATFORM_PREFIX}{request_id}")
 }
 
-/// Best-effort — a write failure just degrades the `platform` tag to
-/// `unknown` for this flow.
+/// Persist the (bounded) `platform` tag for a request.
+///
+/// Always overwrites the key, for the same reuse-safety reason as
+/// `store_slo_metric_flag`. Best-effort — a write failure just degrades the
+/// `platform` tag to `unknown` for this flow.
 pub async fn store_platform(
     redis: &mut ConnectionManager,
     request_id: &str,
     platform: Option<&str>,
 ) {
-    let Some(platform) = platform else {
-        return;
-    };
     if let Err(error) = redis
         .set_ex::<_, _, ()>(
             platform_key(request_id),
-            platform,
+            platform_tag(platform),
             FLOW_EXPIRE_AFTER_SECONDS,
         )
         .await
@@ -136,11 +142,46 @@ pub async fn store_platform(
     }
 }
 
-/// Render the `platform` tag value for a `message_bridge.*` counter. Owned
-/// because the counter macro's tag values must outlive the request.
+/// Render the `platform` tag value for a `message_bridge.*` counter.
+///
+/// Collapses to a fixed vocabulary (`ios`/`android`/`unknown`/`invalid`)
+/// rather than relaying the client's string verbatim: an unbounded value
+/// would let a buggy or hostile caller blow up this metric's cardinality.
 #[must_use]
-pub fn platform_tag(platform: Option<&str>) -> String {
-    platform.unwrap_or("unknown").to_string()
+pub fn platform_tag(platform: Option<&str>) -> &'static str {
+    match platform {
+        Some("ios") => "ios",
+        Some("android") => "android",
+        Some(_) => "invalid",
+        None => "unknown",
+    }
+}
+
+/// Render the `slo_metric` tag from a value read back out of Redis.
+///
+/// `store_slo_metric_flag` always writes one of `slo_metric_tag`'s own
+/// literals, so this just needs a `'static` reference to hand the counter
+/// macro instead of one borrowed from the Redis response; a missing key
+/// (e.g. a write failure) defaults to `false`, same as the origin leg.
+#[must_use]
+pub fn slo_metric_tag_from_stored(value: Option<&str>) -> &'static str {
+    slo_metric_tag(value == Some("true"))
+}
+
+/// Render the `platform` tag from a value read back out of Redis.
+///
+/// `store_platform` always writes one of `platform_tag`'s own literals
+/// (including `"unknown"` for an absent client value), so this matches
+/// those literals directly rather than re-deriving through `platform_tag`,
+/// which would otherwise fold a stored `"unknown"` into `"invalid"`.
+#[must_use]
+pub fn platform_tag_from_stored(value: Option<&str>) -> &'static str {
+    match value {
+        Some("ios") => "ios",
+        Some("android") => "android",
+        Some("invalid") => "invalid",
+        _ => "unknown",
+    }
 }
 
 /// Mint and persist a flow identifier for a newly created request.
@@ -240,8 +281,23 @@ mod tests {
     }
 
     #[test]
-    fn platform_tag_falls_back_to_unknown() {
+    fn platform_tag_recognizes_known_platforms() {
         assert_eq!(platform_tag(Some("ios")), "ios");
+        assert_eq!(platform_tag(Some("android")), "android");
+    }
+
+    #[test]
+    fn platform_tag_falls_back_to_unknown_when_absent() {
         assert_eq!(platform_tag(None), "unknown");
+    }
+
+    #[test]
+    fn platform_tag_bounds_unrecognized_values_to_invalid() {
+        // Anything outside the fixed vocabulary must collapse to one value,
+        // not be relayed verbatim — otherwise a buggy or hostile caller could
+        // mint one metric time series per distinct string it sends.
+        assert_eq!(platform_tag(Some("iOS")), "invalid");
+        assert_eq!(platform_tag(Some("")), "invalid");
+        assert_eq!(platform_tag(Some("anything-else")), "invalid");
     }
 }

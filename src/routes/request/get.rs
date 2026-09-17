@@ -88,8 +88,8 @@ pub(super) async fn handler(
 
     telemetry_batteries::reexports::metrics::counter!(
         "message_bridge.request_consumed",
-        "slo_metric" => observability::slo_metric_tag(slo_metric.is_some()),
-        "platform" => observability::platform_tag(platform.as_deref())
+        "slo_metric" => observability::slo_metric_tag_from_stored(slo_metric.as_deref()),
+        "platform" => observability::platform_tag_from_stored(platform.as_deref())
     )
     .increment(1);
 
