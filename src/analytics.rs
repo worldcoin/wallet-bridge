@@ -25,7 +25,11 @@ impl Analytics {
     /// Returns an error if the HTTP client cannot be built.
     pub fn new(response_fetched_url: Url) -> Result<Self, reqwest::Error> {
         let _provider_install_result = rustls::crypto::ring::default_provider().install_default();
-        let client = Client::builder().timeout(REQUEST_TIMEOUT).build()?;
+        let client = Client::builder()
+            // App Backend's WAF rejects requests without a User-Agent header.
+            .user_agent("wallet-bridge")
+            .timeout(REQUEST_TIMEOUT)
+            .build()?;
 
         Ok(Self {
             client,

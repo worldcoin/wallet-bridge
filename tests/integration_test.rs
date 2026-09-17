@@ -1,7 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::{
-    extract::State, http::StatusCode, routing::post as axum_post, Json as AxumJson, Router,
+    extract::State,
+    http::{header::USER_AGENT, HeaderMap, StatusCode},
+    routing::post as axum_post,
+    Json as AxumJson, Router,
 };
 use serde_json::{json, Value};
 use tokio::{
@@ -39,8 +42,15 @@ const ANALYTICS_PATH: &str = "/analytics";
 
 async fn record_analytics(
     State(sender): State<mpsc::UnboundedSender<Value>>,
+    headers: HeaderMap,
     AxumJson(body): AxumJson<Value>,
 ) -> StatusCode {
+    assert_eq!(
+        headers
+            .get(USER_AGENT)
+            .and_then(|value| value.to_str().ok()),
+        Some("wallet-bridge")
+    );
     sender.send(body).expect("analytics receiver must be open");
     StatusCode::INTERNAL_SERVER_ERROR
 }
