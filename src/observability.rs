@@ -2,8 +2,8 @@
 //!
 //! Records request/response create and consume spans and counters. Flow
 //! identifiers connect those spans so handoff latency can be measured. A
-//! client-reported `slo_metric` flag is relayed onto those counters as a
-//! `slo_metric:{bool}` tag, uninterpreted.
+//! client-reported `supports_flow_telemetry` flag is relayed onto those counters as a
+//! `supports_flow_telemetry:{bool}` tag, uninterpreted.
 
 use std::fmt;
 
@@ -62,45 +62,45 @@ pub fn flow_key(request_id: &str) -> String {
     format!("{FLOW_PREFIX}{request_id}")
 }
 
-/// Redis namespace carrying the `slo_metric` flag between legs.
-const SLO_METRIC_PREFIX: &str = "slo_metric:";
+/// Redis namespace carrying the `supports_flow_telemetry` flag between legs.
+const SUPPORTS_FLOW_TELEMETRY_PREFIX: &str = "supports_flow_telemetry:";
 
 #[must_use]
-pub fn slo_metric_key(request_id: &str) -> String {
-    format!("{SLO_METRIC_PREFIX}{request_id}")
+pub fn supports_flow_telemetry_key(request_id: &str) -> String {
+    format!("{SUPPORTS_FLOW_TELEMETRY_PREFIX}{request_id}")
 }
 
-/// Persist the `slo_metric` cohort membership for a request.
+/// Persist the `supports_flow_telemetry` cohort membership for a request.
 ///
 /// Always overwrites the key, even when `in_cohort` is `false`: a
 /// client-supplied `request_id` can be reused once the underlying request
 /// expires, and skipping the write on `false` would let a stale `true` from
 /// a previous flow at that same ID leak into the new one. Best-effort — a
-/// write failure just degrades the `slo_metric` tag to `false` for this flow.
-pub async fn store_slo_metric_flag(
+/// write failure just degrades the `supports_flow_telemetry` tag to `false` for this flow.
+pub async fn store_supports_flow_telemetry_flag(
     redis: &mut ConnectionManager,
     request_id: &str,
     in_cohort: bool,
 ) {
     if let Err(error) = redis
         .set_ex::<_, _, ()>(
-            slo_metric_key(request_id),
-            slo_metric_tag(in_cohort),
+            supports_flow_telemetry_key(request_id),
+            supports_flow_telemetry_tag(in_cohort),
             FLOW_EXPIRE_AFTER_SECONDS,
         )
         .await
     {
         tracing::warn!(
-            outcome = "slo_metric_write_failed",
+            outcome = "supports_flow_telemetry_write_failed",
             operation = "request_handoff",
-            "Failed to persist slo_metric flag: {error}"
+            "Failed to persist supports_flow_telemetry flag: {error}"
         );
     }
 }
 
-/// Render the `slo_metric` tag value for a `message_bridge.*` counter.
+/// Render the `supports_flow_telemetry` tag value for a `message_bridge.*` counter.
 #[must_use]
-pub const fn slo_metric_tag(in_cohort: bool) -> &'static str {
+pub const fn supports_flow_telemetry_tag(in_cohort: bool) -> &'static str {
     if in_cohort {
         "true"
     } else {
@@ -119,7 +119,7 @@ pub fn platform_key(request_id: &str) -> String {
 /// Persist the (bounded) `platform` tag for a request.
 ///
 /// Always overwrites the key, for the same reuse-safety reason as
-/// `store_slo_metric_flag`. Best-effort — a write failure just degrades the
+/// `store_supports_flow_telemetry_flag`. Best-effort — a write failure just degrades the
 /// `platform` tag to `unknown` for this flow.
 pub async fn store_platform(
     redis: &mut ConnectionManager,
@@ -157,15 +157,15 @@ pub fn platform_tag(platform: Option<&str>) -> &'static str {
     }
 }
 
-/// Render the `slo_metric` tag from a value read back out of Redis.
+/// Render the `supports_flow_telemetry` tag from a value read back out of Redis.
 ///
-/// `store_slo_metric_flag` always writes one of `slo_metric_tag`'s own
+/// `store_supports_flow_telemetry_flag` always writes one of `supports_flow_telemetry_tag`'s own
 /// literals, so this just needs a `'static` reference to hand the counter
 /// macro instead of one borrowed from the Redis response; a missing key
 /// (e.g. a write failure) defaults to `false`, same as the origin leg.
 #[must_use]
-pub fn slo_metric_tag_from_stored(value: Option<&str>) -> &'static str {
-    slo_metric_tag(value == Some("true"))
+pub fn supports_flow_telemetry_tag_from_stored(value: Option<&str>) -> &'static str {
+    supports_flow_telemetry_tag(value == Some("true"))
 }
 
 /// Render the `platform` tag from a value read back out of Redis.
@@ -275,9 +275,9 @@ mod tests {
     }
 
     #[test]
-    fn slo_metric_tag_reflects_cohort_membership() {
-        assert_eq!(slo_metric_tag(true), "true");
-        assert_eq!(slo_metric_tag(false), "false");
+    fn supports_flow_telemetry_tag_reflects_cohort_membership() {
+        assert_eq!(supports_flow_telemetry_tag(true), "true");
+        assert_eq!(supports_flow_telemetry_tag(false), "false");
     }
 
     #[test]

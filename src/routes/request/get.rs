@@ -58,10 +58,10 @@ pub(super) async fn handler(
     pipe.atomic()
         .get_del(format!("{REQ_PREFIX}{request_id}"))
         .get(observability::flow_key(&request_id))
-        .get(observability::slo_metric_key(&request_id))
+        .get(observability::supports_flow_telemetry_key(&request_id))
         .get(observability::platform_key(&request_id));
 
-    let (value, idkit_flow_id, slo_metric, platform): (
+    let (value, idkit_flow_id, supports_flow_telemetry, platform): (
         Option<Vec<u8>>,
         Option<String>,
         Option<String>,
@@ -88,7 +88,7 @@ pub(super) async fn handler(
 
     telemetry_batteries::reexports::metrics::counter!(
         "message_bridge.request_consumed",
-        "slo_metric" => observability::slo_metric_tag_from_stored(slo_metric.as_deref()),
+        "supports_flow_telemetry" => observability::supports_flow_telemetry_tag_from_stored(supports_flow_telemetry.as_deref()),
         "platform" => observability::platform_tag_from_stored(platform.as_deref())
     )
     .increment(1);

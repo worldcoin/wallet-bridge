@@ -20,7 +20,7 @@ pub(super) struct Response {
     response: Option<RequestPayload>,
 }
 
-/// (status, response payload, flow ID, `slo_metric` flag, platform), as
+/// (status, response payload, flow ID, `supports_flow_telemetry` flag, platform), as
 /// read from Redis.
 type PollResult = (
     Option<String>,
@@ -53,10 +53,10 @@ pub(super) async fn handler(
         .get(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .get_del(format!("{RES_PREFIX}{request_id}"))
         .get(observability::flow_key(&request_id))
-        .get(observability::slo_metric_key(&request_id))
+        .get(observability::supports_flow_telemetry_key(&request_id))
         .get(observability::platform_key(&request_id));
 
-    let (status, value, flow, slo_metric, platform): PollResult = pipe
+    let (status, value, flow, supports_flow_telemetry, platform): PollResult = pipe
         .query_async(&mut redis)
         .await
         .map_err(handle_redis_error)?;
@@ -74,7 +74,7 @@ pub(super) async fn handler(
             .atomic()
             .del(format!("{REQ_STATUS_PREFIX}{request_id}"))
             .del(observability::flow_key(&request_id))
-            .del(observability::slo_metric_key(&request_id))
+            .del(observability::supports_flow_telemetry_key(&request_id))
             .del(observability::platform_key(&request_id));
         if cleanup
             .query_async::<(u64, u64, u64, u64)>(&mut redis)
@@ -90,7 +90,7 @@ pub(super) async fn handler(
 
         telemetry_batteries::reexports::metrics::counter!(
             "message_bridge.response_consumed",
-            "slo_metric" => observability::slo_metric_tag_from_stored(slo_metric.as_deref()),
+            "supports_flow_telemetry" => observability::supports_flow_telemetry_tag_from_stored(supports_flow_telemetry.as_deref()),
             "platform" => observability::platform_tag_from_stored(platform.as_deref())
         )
         .increment(1);

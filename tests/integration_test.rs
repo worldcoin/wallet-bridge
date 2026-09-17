@@ -25,19 +25,19 @@ async fn redis_ttl(key: &str) -> i64 {
         .expect("read Redis TTL")
 }
 
-fn slo_metric_key(request_id: &str) -> String {
-    format!("slo_metric:{request_id}")
+fn supports_flow_telemetry_key(request_id: &str) -> String {
+    format!("supports_flow_telemetry:{request_id}")
 }
 
-/// The stored `slo_metric` value ("true"/"false"), or `None` once cleaned up
+/// The stored `supports_flow_telemetry` value ("true"/"false"), or `None` once cleaned up
 /// after response delivery — the key always exists otherwise, since
-/// `store_slo_metric_flag` overwrites it unconditionally.
-async fn slo_metric(request_id: &str) -> Option<String> {
+/// `store_supports_flow_telemetry_flag` overwrites it unconditionally.
+async fn supports_flow_telemetry(request_id: &str) -> Option<String> {
     common::redis_connection()
         .await
-        .get(slo_metric_key(request_id))
+        .get(supports_flow_telemetry_key(request_id))
         .await
-        .expect("read slo_metric flag")
+        .expect("read supports_flow_telemetry flag")
 }
 
 fn platform_key(request_id: &str) -> String {
@@ -935,12 +935,12 @@ async fn test_standalone_response_does_not_create_idkit_flow_id() {
 }
 
 // ---------------------------------------------------------------------------
-// `slo_metric` / `platform`: opaque client fields relayed onto
+// `supports_flow_telemetry` / `platform`: opaque client fields relayed onto
 // message_bridge.* counters.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_slo_metric_and_platform_default_to_false_and_unknown() {
+async fn test_supports_flow_telemetry_and_platform_default_to_false_and_unknown() {
     let app = common::test_app().await;
     let request_id = fresh_id();
     let request = json!({
@@ -952,15 +952,18 @@ async fn test_slo_metric_and_platform_default_to_false_and_unknown() {
     let (status, body) = common::post(&app, "/request", &request).await;
     assert_eq!(status, 200, "request creation failed: {body}");
     assert_eq!(
-        slo_metric(&request_id).await.as_deref(),
+        supports_flow_telemetry(&request_id).await.as_deref(),
         Some("false"),
-        "omitting is_slo_metric must store false, not leave the key unset"
+        "omitting supports_flow_telemetry must store false, not leave the key unset"
     );
     assert_eq!(platform(&request_id).await.as_deref(), Some("unknown"));
 
     let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
     assert_eq!(status, 200, "request consumption failed: {body}");
-    assert_eq!(slo_metric(&request_id).await.as_deref(), Some("false"));
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("false")
+    );
     assert_eq!(platform(&request_id).await.as_deref(), Some("unknown"));
 
     let response = json!({
@@ -969,31 +972,37 @@ async fn test_slo_metric_and_platform_default_to_false_and_unknown() {
     });
     let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
     assert_eq!(status, 201, "response creation failed: {body}");
-    assert_eq!(slo_metric(&request_id).await.as_deref(), Some("false"));
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("false")
+    );
     assert_eq!(platform(&request_id).await.as_deref(), Some("unknown"));
 }
 
 #[tokio::test]
-async fn test_slo_metric_and_platform_persist_through_the_flow_and_are_cleaned_up() {
+async fn test_supports_flow_telemetry_and_platform_persist_through_the_flow_and_are_cleaned_up() {
     let app = common::test_app().await;
     let request_id = fresh_id();
     let request = json!({
         "request_id": request_id,
         "iv": "cohort-opt-in-iv",
         "payload": "cohort-opt-in-payload",
-        "is_slo_metric": true,
+        "supports_flow_telemetry": true,
         "platform": "ios",
     });
 
     let (status, body) = common::post(&app, "/request", &request).await;
     assert_eq!(status, 200, "request creation failed: {body}");
-    assert_eq!(slo_metric(&request_id).await.as_deref(), Some("true"));
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("true")
+    );
     assert_eq!(platform(&request_id).await.as_deref(), Some("ios"));
 
     let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
     assert_eq!(status, 200, "request consumption failed: {body}");
     assert_eq!(
-        slo_metric(&request_id).await.as_deref(),
+        supports_flow_telemetry(&request_id).await.as_deref(),
         Some("true"),
         "request consumption must not consume the flag"
     );
@@ -1006,7 +1015,7 @@ async fn test_slo_metric_and_platform_persist_through_the_flow_and_are_cleaned_u
     let (status, body) = common::put(&app, &format!("/response/{request_id}"), &response).await;
     assert_eq!(status, 201, "response creation failed: {body}");
     assert_eq!(
-        slo_metric(&request_id).await.as_deref(),
+        supports_flow_telemetry(&request_id).await.as_deref(),
         Some("true"),
         "response creation must not consume the flag"
     );
@@ -1016,7 +1025,7 @@ async fn test_slo_metric_and_platform_persist_through_the_flow_and_are_cleaned_u
     assert_eq!(status, 200, "response consumption failed: {body}");
     let _: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        slo_metric(&request_id).await,
+        supports_flow_telemetry(&request_id).await,
         None,
         "the flag is cleaned up once the response is delivered, like the flow ID"
     );
@@ -1028,7 +1037,7 @@ async fn test_slo_metric_and_platform_persist_through_the_flow_and_are_cleaned_u
 }
 
 #[tokio::test]
-async fn test_slo_metric_and_platform_do_not_leak_across_a_reused_request_id() {
+async fn test_supports_flow_telemetry_and_platform_do_not_leak_across_a_reused_request_id() {
     // A client-supplied request_id can be reused once the original request
     // expires. A stale true/platform from that earlier flow must never leak
     // into a new one that doesn't opt in — the exact bug an always-write
@@ -1040,12 +1049,15 @@ async fn test_slo_metric_and_platform_do_not_leak_across_a_reused_request_id() {
         "request_id": request_id,
         "iv": "reuse-first-iv",
         "payload": "reuse-first-payload",
-        "is_slo_metric": true,
+        "supports_flow_telemetry": true,
         "platform": "ios",
     });
     let (status, body) = common::post(&app, "/request", &first).await;
     assert_eq!(status, 200, "first request creation failed: {body}");
-    assert_eq!(slo_metric(&request_id).await.as_deref(), Some("true"));
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("true")
+    );
     assert_eq!(platform(&request_id).await.as_deref(), Some("ios"));
 
     // Consume it so a second POST with the same id is accepted (NX would
@@ -1061,9 +1073,9 @@ async fn test_slo_metric_and_platform_do_not_leak_across_a_reused_request_id() {
     let (status, body) = common::post(&app, "/request", &second).await;
     assert_eq!(status, 200, "second request creation failed: {body}");
     assert_eq!(
-        slo_metric(&request_id).await.as_deref(),
+        supports_flow_telemetry(&request_id).await.as_deref(),
         Some("false"),
-        "the second flow's own (omitted) is_slo_metric must overwrite the first flow's true"
+        "the second flow's own (omitted) supports_flow_telemetry must overwrite the first flow's true"
     );
     assert_eq!(
         platform(&request_id).await.as_deref(),
