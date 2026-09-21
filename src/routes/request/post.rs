@@ -130,6 +130,8 @@ pub(super) async fn handler(
         tracing::warn!(outcome, "Failed to mint and store IDKit flow ID");
     }
 
+    // supports_flow_telemetry/client_name are reported on GET /request/:id
+    // instead — the RP calling POST has no way to know either.
     telemetry_batteries::reexports::metrics::counter!("message_bridge.request_created")
         .increment(1);
 

@@ -36,6 +36,33 @@ async fn redis_ttl(key: &str) -> i64 {
         .expect("read Redis TTL")
 }
 
+fn supports_flow_telemetry_key(request_id: &str) -> String {
+    format!("supports_flow_telemetry:{request_id}")
+}
+
+/// The stored `supports_flow_telemetry` value ("true"/"false"), or `None` once cleaned up
+/// after response delivery — the key always exists otherwise, since
+/// `store_supports_flow_telemetry_flag` overwrites it unconditionally.
+async fn supports_flow_telemetry(request_id: &str) -> Option<String> {
+    common::redis_connection()
+        .await
+        .get(supports_flow_telemetry_key(request_id))
+        .await
+        .expect("read supports_flow_telemetry flag")
+}
+
+fn client_name_key(request_id: &str) -> String {
+    format!("client_name:{request_id}")
+}
+
+async fn client_name(request_id: &str) -> Option<String> {
+    common::redis_connection()
+        .await
+        .get(client_name_key(request_id))
+        .await
+        .expect("read client_name")
+}
+
 mod common;
 
 const ANALYTICS_PATH: &str = "/analytics";
@@ -1002,5 +1029,229 @@ async fn test_standalone_response_does_not_create_idkit_flow_id() {
     assert!(
         flow_id(request_id).await.is_none(),
         "standalone response flows stay outside WDP85 tracing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `supports_flow_telemetry` / `client_name`: sourced entirely from headers
+// on GET /request/:id, since POST /request can't know either.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_post_request_never_sets_supports_flow_telemetry_or_client_name() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "post-only-iv",
+        "payload": "post-only-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await,
+        None,
+        "POST /request must never write this key — only GET does"
+    );
+    assert_eq!(client_name(&request_id).await, None);
+}
+
+#[tokio::test]
+async fn test_get_request_without_headers_defaults_to_false_and_unknown() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "default-iv",
+        "payload": "default-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("false"),
+        "a missing header must still result in a stored, explicit false"
+    );
+    assert_eq!(client_name(&request_id).await.as_deref(), Some("unknown"));
+}
+
+#[tokio::test]
+async fn test_get_request_headers_set_supports_flow_telemetry_and_client_name() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "get-header-iv",
+        "payload": "get-header-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    let (status, body) = common::get_with_headers(
+        &app,
+        &format!("/request/{request_id}"),
+        &[
+            ("supports-flow-telemetry", "true"),
+            ("client-name", "android"),
+        ],
+    )
+    .await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("true")
+    );
+    assert_eq!(client_name(&request_id).await.as_deref(), Some("android"));
+
+    // Carries forward to the response legs, same as the flow ID.
+    let response = json!({
+        "iv": "get-header-response-iv",
+        "payload": "get-header-response-payload",
+    });
+    let (status, _) = common::put(&app, &format!("/response/{request_id}"), &response).await;
+    assert_eq!(status, 201);
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("true")
+    );
+    assert_eq!(client_name(&request_id).await.as_deref(), Some("android"));
+
+    let (status, body) = common::get(&app, &format!("/response/{request_id}")).await;
+    assert_eq!(status, 200, "response consumption failed: {body}");
+    let _: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await,
+        None,
+        "cleaned up once the response is delivered, like the flow ID"
+    );
+    assert_eq!(client_name(&request_id).await, None);
+}
+
+#[tokio::test]
+async fn test_get_request_header_present_but_not_true_is_an_explicit_false() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "explicit-false-iv",
+        "payload": "explicit-false-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    let (status, body) = common::get_with_headers(
+        &app,
+        &format!("/request/{request_id}"),
+        &[("supports-flow-telemetry", "nope")],
+    )
+    .await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("false")
+    );
+}
+
+#[tokio::test]
+async fn test_client_name_outside_the_fixed_vocabulary_is_bounded_to_invalid() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+    let request = json!({
+        "request_id": request_id,
+        "iv": "invalid-client-name-iv",
+        "payload": "invalid-client-name-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &request).await;
+    assert_eq!(status, 200, "request creation failed: {body}");
+
+    let (status, body) = common::get_with_headers(
+        &app,
+        &format!("/request/{request_id}"),
+        &[("client-name", "totally-not-a-real-client")],
+    )
+    .await;
+    assert_eq!(status, 200, "request consumption failed: {body}");
+    assert_eq!(
+        client_name(&request_id).await.as_deref(),
+        Some("invalid"),
+        "an unrecognized client_name string must not be relayed verbatim as a metric tag"
+    );
+}
+
+#[tokio::test]
+async fn test_client_name_recognizes_id_and_money_app_variants() {
+    for client_name_value in ["ios-id", "android-id", "ios-money", "android-money"] {
+        let app = common::test_app().await;
+        let request_id = fresh_id();
+        let request = json!({
+            "request_id": request_id,
+            "iv": "variant-client-name-iv",
+            "payload": "variant-client-name-payload",
+        });
+        let (status, body) = common::post(&app, "/request", &request).await;
+        assert_eq!(status, 200, "request creation failed: {body}");
+
+        let (status, body) = common::get_with_headers(
+            &app,
+            &format!("/request/{request_id}"),
+            &[("client-name", client_name_value)],
+        )
+        .await;
+        assert_eq!(status, 200, "request consumption failed: {body}");
+        assert_eq!(
+            client_name(&request_id).await.as_deref(),
+            Some(client_name_value)
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_supports_flow_telemetry_and_client_name_do_not_leak_across_a_reused_request_id() {
+    let app = common::test_app().await;
+    let request_id = fresh_id();
+
+    let first = json!({
+        "request_id": request_id,
+        "iv": "reuse-first-iv",
+        "payload": "reuse-first-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &first).await;
+    assert_eq!(status, 200, "first request creation failed: {body}");
+
+    let (status, body) = common::get_with_headers(
+        &app,
+        &format!("/request/{request_id}"),
+        &[("supports-flow-telemetry", "true"), ("client-name", "ios")],
+    )
+    .await;
+    assert_eq!(status, 200, "first request consumption failed: {body}");
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("true")
+    );
+    assert_eq!(client_name(&request_id).await.as_deref(), Some("ios"));
+
+    let second = json!({
+        "request_id": request_id,
+        "iv": "reuse-second-iv",
+        "payload": "reuse-second-payload",
+    });
+    let (status, body) = common::post(&app, "/request", &second).await;
+    assert_eq!(status, 200, "second request creation failed: {body}");
+
+    let (status, body) = common::get(&app, &format!("/request/{request_id}")).await;
+    assert_eq!(status, 200, "second request consumption failed: {body}");
+    assert_eq!(
+        supports_flow_telemetry(&request_id).await.as_deref(),
+        Some("false"),
+        "the second flow's own (header-less) fetch must overwrite the first flow's true"
+    );
+    assert_eq!(
+        client_name(&request_id).await.as_deref(),
+        Some("unknown"),
+        "the second flow's own (header-less) fetch must overwrite the first flow's ios"
     );
 }

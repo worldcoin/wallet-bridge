@@ -34,8 +34,15 @@ pub(super) async fn handler(
     let mut pipe = redis::pipe();
     pipe.atomic()
         .get(format!("{REQ_STATUS_PREFIX}{request_id}"))
-        .get(observability::flow_key(&request_id));
-    let (status, flow): (Option<String>, Option<String>) = pipe
+        .get(observability::flow_key(&request_id))
+        .get(observability::supports_flow_telemetry_key(&request_id))
+        .get(observability::client_name_key(&request_id));
+    let (status, flow, supports_flow_telemetry, client_name): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = pipe
         .query_async(&mut redis)
         .await
         .map_err(handle_redis_error)?;
@@ -70,8 +77,12 @@ pub(super) async fn handler(
         .await
         .map_err(handle_redis_error)?;
 
-    telemetry_batteries::reexports::metrics::counter!("message_bridge.response_created")
-        .increment(1);
+    telemetry_batteries::reexports::metrics::counter!(
+        "message_bridge.response_created",
+        "supports_flow_telemetry" => observability::supports_flow_telemetry_tag_from_stored(supports_flow_telemetry.as_deref()),
+        "client_name" => observability::client_name_tag_from_stored(client_name.as_deref())
+    )
+    .increment(1);
 
     Ok(StatusCode::CREATED)
 }

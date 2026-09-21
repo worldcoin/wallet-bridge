@@ -21,6 +21,16 @@ pub(super) struct Response {
     response: Option<RequestPayload>,
 }
 
+/// (status, response payload, flow ID, `supports_flow_telemetry` flag,
+/// `client_name`), as read from Redis.
+type PollResult = (
+    Option<String>,
+    Option<Vec<u8>>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 #[tracing::instrument(
     parent = None,
     name = "message_bridge.response.consume",
@@ -44,9 +54,11 @@ pub(super) async fn handler(
     pipe.atomic()
         .get(format!("{REQ_STATUS_PREFIX}{request_id}"))
         .get_del(format!("{RES_PREFIX}{request_id}"))
-        .get(observability::flow_key(&request_id));
+        .get(observability::flow_key(&request_id))
+        .get(observability::supports_flow_telemetry_key(&request_id))
+        .get(observability::client_name_key(&request_id));
 
-    let (status, value, flow): (Option<String>, Option<Vec<u8>>, Option<String>) = pipe
+    let (status, value, flow, supports_flow_telemetry, client_name): PollResult = pipe
         .query_async(&mut redis)
         .await
         .map_err(handle_redis_error)?;
@@ -63,8 +75,14 @@ pub(super) async fn handler(
         cleanup
             .atomic()
             .del(format!("{REQ_STATUS_PREFIX}{request_id}"))
-            .del(observability::flow_key(&request_id));
-        if cleanup.query_async::<(u64, u64)>(&mut redis).await.is_err() {
+            .del(observability::flow_key(&request_id))
+            .del(observability::supports_flow_telemetry_key(&request_id))
+            .del(observability::client_name_key(&request_id));
+        if cleanup
+            .query_async::<(u64, u64, u64, u64)>(&mut redis)
+            .await
+            .is_err()
+        {
             tracing::warn!(
                 outcome = "flow_id_cleanup_failed",
                 operation = "response_handoff",
@@ -72,8 +90,12 @@ pub(super) async fn handler(
             );
         }
 
-        telemetry_batteries::reexports::metrics::counter!("message_bridge.response_consumed")
-            .increment(1);
+        telemetry_batteries::reexports::metrics::counter!(
+            "message_bridge.response_consumed",
+            "supports_flow_telemetry" => observability::supports_flow_telemetry_tag_from_stored(supports_flow_telemetry.as_deref()),
+            "client_name" => observability::client_name_tag_from_stored(client_name.as_deref())
+        )
+        .increment(1);
 
         if let Some(tracking_receipt) = stored_response.tracking_receipt {
             analytics.send_response_fetched_event(tracking_receipt);
