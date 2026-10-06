@@ -347,6 +347,29 @@ async fn test_response_fetch_calls_analytics_url() {
     server.abort();
 }
 
+#[tokio::test]
+async fn test_response_receipt_with_analytics_disabled() {
+    let app = common::test_app().await;
+    let (status, body) = common::post(
+        &app,
+        "/response",
+        &json!({"iv": "iv", "payload": "ciphertext", "tracking_receipt": "opaque-receipt"}),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let created: Value = serde_json::from_str(&body).unwrap();
+    let url = format!("/response/{}", created["request_id"].as_str().unwrap());
+
+    let (status, body) = common::get(&app, &url).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({"status": "completed", "response": {"iv": "iv", "payload": "ciphertext"}})
+    );
+    let (status, _) = common::get(&app, &url).await;
+    assert_eq!(status, 404);
+}
+
 /// Test GET /response/:id returns pending status when response not yet submitted
 #[tokio::test]
 async fn test_response_pending_status() {
@@ -782,7 +805,7 @@ async fn test_flow_id_lifecycle_uses_fixed_ttl_and_cleans_up() {
         .expect("flow ID prefix");
     Uuid::parse_str(uuid).expect("flow ID suffix is a UUID");
     let created_ttl = redis_ttl(&flow_key(&request_id)).await;
-    assert!((1801..=2700).contains(&created_ttl));
+    assert!((1..=900).contains(&created_ttl));
 
     let (request_status, request_body) = common::get(&app, &format!("/request/{request_id}")).await;
     assert_eq!(
@@ -802,6 +825,13 @@ async fn test_flow_id_lifecycle_uses_fixed_ttl_and_cleans_up() {
         flow_id(&request_id).await.as_deref(),
         Some(created_flow.as_str())
     );
+    for key in [
+        supports_flow_telemetry_key(&request_id),
+        format!("client_name:{request_id}"),
+    ] {
+        let ttl = redis_ttl(&key).await;
+        assert!((1..=900).contains(&ttl), "unexpected TTL for {key}: {ttl}");
+    }
     let request_ttl = redis_ttl(&flow_key(&request_id)).await;
     assert!(
         request_ttl <= created_ttl,

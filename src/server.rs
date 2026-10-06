@@ -14,7 +14,7 @@ use crate::{analytics::Analytics, utils::AppOverrides};
 pub async fn start(
     redis: ConnectionManager,
     app_overrides: Arc<AppOverrides>,
-    analytics: Arc<Analytics>,
+    analytics: Option<Arc<Analytics>>,
 ) {
     let router = crate::app(redis, app_overrides, analytics);
 

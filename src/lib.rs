@@ -23,7 +23,7 @@ pub mod utils;
 pub fn app(
     redis: ConnectionManager,
     app_overrides: Arc<AppOverrides>,
-    analytics: Arc<Analytics>,
+    analytics: Option<Arc<Analytics>>,
 ) -> axum::Router {
     let mut openapi = OpenApi {
         info: Info {

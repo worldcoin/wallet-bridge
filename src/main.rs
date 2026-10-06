@@ -51,17 +51,24 @@ async fn main() {
     tracing::info!("✅ Connection to Redis established.");
 
     let app_overrides = Arc::new(load_app_overrides());
-    let analytics = Arc::new(load_analytics());
+    let analytics = load_analytics().map(Arc::new);
 
     world_id_bridge::server::start(redis, app_overrides, analytics).await;
 }
 
-fn load_analytics() -> Analytics {
-    let url = env::var("ANALYTICS_CALLBACK_URL")
-        .expect("ANALYTICS_CALLBACK_URL is required")
+fn load_analytics() -> Option<Analytics> {
+    let url = match env::var("ANALYTICS_CALLBACK_URL") {
+        Ok(url) => url,
+        Err(env::VarError::NotPresent) => {
+            tracing::info!("ANALYTICS_CALLBACK_URL not set; analytics callbacks disabled.");
+            return None;
+        }
+        Err(error) => panic!("Failed to read ANALYTICS_CALLBACK_URL: {error}"),
+    };
+    let url = url
         .parse()
         .expect("ANALYTICS_CALLBACK_URL must be a valid URL");
-    Analytics::new(url).expect("Failed to build analytics client")
+    Some(Analytics::new(url).expect("Failed to build analytics client"))
 }
 
 /// Load the per-`app_id` URL override map from the `APP_URL_OVERRIDES` env var.

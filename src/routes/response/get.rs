@@ -43,7 +43,7 @@ type PollResult = (
 pub(super) async fn handler(
     Path(request_id): Path<String>,
     Extension(mut redis): Extension<ConnectionManager>,
-    Extension(analytics): Extension<Arc<Analytics>>,
+    Extension(analytics): Extension<Option<Arc<Analytics>>>,
 ) -> Result<Json<Response>, StatusCode> {
     let request_id = request_id.to_lowercase();
     validate_request_id(&request_id)?;
@@ -97,7 +97,9 @@ pub(super) async fn handler(
         )
         .increment(1);
 
-        if let Some(tracking_receipt) = stored_response.tracking_receipt {
+        if let (Some(analytics), Some(tracking_receipt)) =
+            (analytics, stored_response.tracking_receipt)
+        {
             analytics.send_response_fetched_event(tracking_receipt);
         }
 

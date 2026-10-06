@@ -39,9 +39,11 @@ Bridge ->> IDKit: <response>
 
 Response uploads may include an optional `tracking_receipt` alongside `iv` and
 `payload`. The receipt remains opaque, expires with the response, and is never
-returned to the response consumer. The bridge sends the receipt to the required
-`ANALYTICS_CALLBACK_URL` after the response is dequeued and decoded. Analytics
-delivery is best-effort and never blocks response delivery.
+returned to the response consumer. When `ANALYTICS_CALLBACK_URL` is set, the bridge
+sends the receipt to that URL after the response is dequeued and decoded. Leave the variable unset to disable
+callbacks; a configured URL must be valid (an empty value is invalid). Analytics
+delivery is best-effort and never blocks response delivery. Operational metrics
+and tracing remain enabled independently of callbacks.
 
 ### Standalone Response Flow
 
