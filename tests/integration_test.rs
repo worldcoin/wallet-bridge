@@ -347,6 +347,29 @@ async fn test_response_fetch_calls_analytics_url() {
     server.abort();
 }
 
+#[tokio::test]
+async fn test_response_receipt_with_analytics_disabled() {
+    let app = common::test_app().await;
+    let (status, body) = common::post(
+        &app,
+        "/response",
+        &json!({"iv": "iv", "payload": "ciphertext", "tracking_receipt": "opaque-receipt"}),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let created: Value = serde_json::from_str(&body).unwrap();
+    let url = format!("/response/{}", created["request_id"].as_str().unwrap());
+
+    let (status, body) = common::get(&app, &url).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({"status": "completed", "response": {"iv": "iv", "payload": "ciphertext"}})
+    );
+    let (status, _) = common::get(&app, &url).await;
+    assert_eq!(status, 404);
+}
+
 /// Test GET /response/:id returns pending status when response not yet submitted
 #[tokio::test]
 async fn test_response_pending_status() {

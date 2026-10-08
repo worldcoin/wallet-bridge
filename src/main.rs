@@ -51,17 +51,24 @@ async fn main() {
     tracing::info!("✅ Connection to Redis established.");
 
     let app_overrides = Arc::new(load_app_overrides());
-    let analytics = Arc::new(load_analytics());
+    let analytics = load_analytics(env::var("ANALYTICS_CALLBACK_URL")).map(Arc::new);
 
     world_id_bridge::server::start(redis, app_overrides, analytics).await;
 }
 
-fn load_analytics() -> Analytics {
-    let url = env::var("ANALYTICS_CALLBACK_URL")
-        .expect("ANALYTICS_CALLBACK_URL is required")
+fn load_analytics(value: Result<String, env::VarError>) -> Option<Analytics> {
+    let url = match value {
+        Ok(url) => url,
+        Err(env::VarError::NotPresent) => {
+            tracing::info!("ANALYTICS_CALLBACK_URL not set; analytics callbacks disabled.");
+            return None;
+        }
+        Err(error) => panic!("Failed to read ANALYTICS_CALLBACK_URL: {error}"),
+    };
+    let url = url
         .parse()
         .expect("ANALYTICS_CALLBACK_URL must be a valid URL");
-    Analytics::new(url).expect("Failed to build analytics client")
+    Some(Analytics::new(url).expect("Failed to build analytics client"))
 }
 
 /// Load the per-`app_id` URL override map from the `APP_URL_OVERRIDES` env var.
@@ -104,4 +111,38 @@ async fn build_redis_pool(redis_url: String) -> redis::RedisResult<ConnectionMan
             "Redis connection timeout after 30 seconds",
         ))
     })?
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::load_analytics;
+    use std::env::VarError;
+
+    #[test]
+    fn unset_callback_disables_analytics() {
+        assert!(load_analytics(Err(VarError::NotPresent)).is_none());
+    }
+
+    #[test]
+    fn configured_callback_enables_analytics() {
+        assert!(load_analytics(Ok("https://example.com/analytics".to_owned())).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "ANALYTICS_CALLBACK_URL must be a valid URL")]
+    fn empty_callback_is_rejected() {
+        load_analytics(Ok(String::new()));
+    }
+
+    #[test]
+    #[should_panic(expected = "ANALYTICS_CALLBACK_URL must be a valid URL")]
+    fn malformed_callback_is_rejected() {
+        load_analytics(Ok("not-a-url".to_owned()));
+    }
+
+    #[test]
+    #[should_panic(expected = "Failed to read ANALYTICS_CALLBACK_URL")]
+    fn unreadable_callback_is_rejected() {
+        load_analytics(Err(VarError::NotUnicode("invalid".into())));
+    }
 }

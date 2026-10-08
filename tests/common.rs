@@ -46,15 +46,10 @@ pub async fn redis_connection() -> ConnectionManager {
 
 /// Build the real bridge router, wired to a local Redis and the override fixture.
 pub async fn test_app() -> axum::Router {
-    let analytics_url = "http://127.0.0.1:1/analytics"
-        .parse()
-        .expect("test analytics URL must be valid");
-    let analytics = Analytics::new(analytics_url).expect("test analytics client must build");
-
     app(
         redis_connection().await,
         Arc::new(fixture_overrides()),
-        Arc::new(analytics),
+        None,
     )
 }
 
@@ -67,7 +62,7 @@ pub async fn test_app_with_analytics(callback_url: &str) -> axum::Router {
     app(
         redis_connection().await,
         Arc::new(fixture_overrides()),
-        Arc::new(analytics),
+        Some(Arc::new(analytics)),
     )
 }
 
