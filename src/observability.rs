@@ -20,6 +20,9 @@ pub const FLOW_PREFIX: &str = "flow:";
 
 const IDKIT_FLOW_ID_PREFIX: &str = "idkitflow_";
 
+/// Covers the request wait, app processing, and response wait windows.
+const FLOW_EXPIRE_AFTER_SECONDS: u64 = EXPIRE_AFTER_SECONDS * 3;
+
 /// Opaque correlation identifier shared by the spans in one `IDKit` flow.
 ///
 /// The textual prefix distinguishes this value from request IDs and other
@@ -78,7 +81,7 @@ pub async fn store_supports_flow_telemetry_flag(
         .set_ex::<_, _, ()>(
             supports_flow_telemetry_key(request_id),
             supports_flow_telemetry_tag(in_cohort),
-            EXPIRE_AFTER_SECONDS,
+            FLOW_EXPIRE_AFTER_SECONDS,
         )
         .await
     {
@@ -118,7 +121,7 @@ pub async fn store_client_name(
         .set_ex::<_, _, ()>(
             client_name_key(request_id),
             client_name_tag(client_name),
-            EXPIRE_AFTER_SECONDS,
+            FLOW_EXPIRE_AFTER_SECONDS,
         )
         .await
     {
@@ -184,7 +187,7 @@ pub async fn mint_and_store_idkit_flow_id(
         .set_ex::<_, _, ()>(
             flow_key(request_id),
             idkit_flow_id.as_str(),
-            EXPIRE_AFTER_SECONDS,
+            FLOW_EXPIRE_AFTER_SECONDS,
         )
         .await
         .map_err(|_| "flow_id_write_failed")?;

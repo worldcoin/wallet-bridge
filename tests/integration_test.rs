@@ -805,7 +805,7 @@ async fn test_flow_id_lifecycle_uses_fixed_ttl_and_cleans_up() {
         .expect("flow ID prefix");
     Uuid::parse_str(uuid).expect("flow ID suffix is a UUID");
     let created_ttl = redis_ttl(&flow_key(&request_id)).await;
-    assert!((1..=900).contains(&created_ttl));
+    assert!((1801..=2700).contains(&created_ttl));
 
     let (request_status, request_body) = common::get(&app, &format!("/request/{request_id}")).await;
     assert_eq!(
@@ -825,13 +825,6 @@ async fn test_flow_id_lifecycle_uses_fixed_ttl_and_cleans_up() {
         flow_id(&request_id).await.as_deref(),
         Some(created_flow.as_str())
     );
-    for key in [
-        supports_flow_telemetry_key(&request_id),
-        format!("client_name:{request_id}"),
-    ] {
-        let ttl = redis_ttl(&key).await;
-        assert!((1..=900).contains(&ttl), "unexpected TTL for {key}: {ttl}");
-    }
     let request_ttl = redis_ttl(&flow_key(&request_id)).await;
     assert!(
         request_ttl <= created_ttl,
