@@ -28,9 +28,7 @@ async fn main() {
             env::var("REDIS_USERNAME").expect("REDIS_USERNAME required if REDIS_URL is not set.");
         let password =
             env::var("REDIS_PASSWORD").expect("REDIS_PASSWORD required if REDIS_URL is not set.");
-        let use_tls = env::var("REDIS_USE_TLS")
-            .map(|val| val.to_lowercase() == "true")
-            .unwrap_or(false);
+        let use_tls = env::var("REDIS_USE_TLS").is_ok_and(|val| val.to_lowercase() == "true");
 
         format!(
             "{}://{username}:{password}@{host}:{port}",
